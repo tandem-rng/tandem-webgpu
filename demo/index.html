@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tandem-webgpu demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 48rem; padding: 0 1rem; color: #1b1f2a; background: #fbf7f2; }
+  pre { background: #232a3a; color: #eef0ea; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+  button { font: inherit; padding: 0.4rem 1rem; }
+</style>
+</head>
+<body>
+<h1>tandem-webgpu</h1>
+<p>Fills 2<sup>24</sup> 32-bit words of the Tandem8x32 stream for seed 42 on the GPU.
+Serve this directory and open it in a browser with WebGPU.</p>
+<button id="run">Run</button>
+<pre id="out">waiting</pre>
+<script type="module">
+import { fill, fillBuffer, requestDevice, seed } from "../dist/mod.js";
+
+const out = document.getElementById("out");
+const n = 1 << 24;
+document.getElementById("run").onclick = async () => {
+  try {
+    const device = await requestDevice();
+    const key = seed(42n);
+    const { values } = await fill(device, { key, count: 8, dtype: "u32" });
+    const words = [...values].map((w) => w.toString(16).padStart(8, "0")).join(" ");
+    // Device-only fills into one reused buffer, timed with the queue's completion.
+    const buffer = device.createBuffer({ size: 4 * n, usage: GPUBufferUsage.STORAGE });
+    async function once() {
+      const t0 = performance.now();
+      await fillBuffer(device, { key, count: n, dtype: "u32", buffer });
+      await device.queue.onSubmittedWorkDone();
+      return (performance.now() - t0) / 1e3;
+    }
+    for (let i = 0; i < 5; i++) await once();
+    let best = Infinity;
+    for (let i = 0; i < 7; i++) best = Math.min(best, await once());
+    out.textContent = `first words: ${words}\nfill_u32 2^24 words: ${(4 * n / best / 2 ** 30).toFixed(1)} GiB/s (min of 7)`;
+  } catch (e) {
+    out.textContent = String(e);
+  }
+};
+</script>
+</body>
+</html>
