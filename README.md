@@ -56,7 +56,7 @@ shape is 720 GiB/s. A submit and its completion cost about 0.4 ms on wgpu, so a 
 fill is latency bound: batch fills in one submit or fill large buffers.
 
 Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7 after a
-warm-up, load 3 to 8:
+warm-up:
 
 | | GiB/s |
 |---|---|
