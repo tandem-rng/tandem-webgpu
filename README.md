@@ -53,19 +53,27 @@ a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the 
 
 ## Speed
 
-Apple M4 Pro GPU, `fill_u32` of 2^26 words into device memory, minimum of 7, load 9:
+Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7, load 3 to 8:
 
 | | GiB/s |
 |---|---|
-| Deno 2.9 (wgpu, Metal), one fill per submit | 18.5 |
-| Deno 2.9, 32 fills per submit | 133.5 |
-| Chromium (Playwright) demo page, 2^24 words, one fill per submit | 69.4 |
+| Deno 2.9 (wgpu, Metal), 2^26 words, one fill per submit | 18.5 |
+| Deno 2.9, 2^26 words, 32 fills per submit | 134 to 144 |
+| Chromium (Dawn, Metal), 2^24 words, one fill per submit | 89 |
+| Chromium, 2^26 and 2^27 words, one fill per submit | 167 |
+| Chromium, 2^24 words, 16 fills per submit | 213 |
+| store ceiling: one constant block per invocation, same buffer, 32 per submit | 700 to 720 |
 
-One submit and its completion cost about 0.4 ms on this stack, so a single fill is latency
-bound and the second row is the kernel's throughput. Browser timing is `performance.now()`
-around the submit and the queue's completion, which is coarse. The workgroup tile with
-512-byte writes per SIMD group, as in tandem-cuda, measured four times slower here (34 GiB/s
-against 143 at K = 32 in the batched protocol), so the fill stores each block directly.
+A submit and its completion cost about 0.4 ms on wgpu, so a single small fill is latency
+bound. The last row is the store ceiling of the same buffer and dispatch shape, and the
+fill's own strided store pattern reaches it with constant data, so the fill is compute bound
+at a fifth of the ceiling. Measured and rejected on this GPU, all within noise of the
+committed shader or slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no
+bounds check, workgroups of 64 or 128, four steps unrolled per store burst, a lane-major
+thread mapping, two chunks per invocation, and the workgroup tile with 512-byte writes per
+SIMD group from tandem-cuda, which measured four times slower (34 against 143 at K = 32).
+Dawn's shader compiler gives 20 to 50% more than wgpu's on the same source. `deno task
+bench` prints the first two rows and the ceiling.
 
 `demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
 open `/demo/`.
