@@ -95,7 +95,7 @@ fn sub_key(key: vec4<u32>, purpose_lo: u32, purpose_hi: u32) -> vec4<u32> {
 // One invocation per chunk, 32 groups of 8 lanes per workgroup, each storing its 16-byte
 // block straight to the output. The eight lanes of a group write one contiguous 128-byte
 // row, so stores coalesce without staging. A workgroup tile with 512-byte writes per
-// SIMD group, the design of tandem-cuda, measured four times slower on Apple M4 Pro under
+// SIMD group, measured four times slower on Apple M4 Pro under
 // Metal, so it is not used here.
 
 const THREADS = 256u;

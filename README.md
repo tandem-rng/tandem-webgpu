@@ -5,10 +5,7 @@
 [Tandem8x32](https://github.com/tandem-rng/spec) for WebGPU: a noncryptographic pseudorandom
 number generator built to be fast on CPUs and GPUs alike. A WGSL compute shader fills the
 stream on the GPU, and a small TypeScript module derives keys and small draws on the CPU. It
-produces the same stream, bit for bit, as [TandemRNG.jl](https://github.com/tandem-rng/TandemRNG.jl),
-[tandem-c](https://github.com/tandem-rng/tandem-c), [tandem-rs](https://github.com/tandem-rng/tandem-rs),
-[tandem-numpy](https://github.com/tandem-rng/tandem-numpy), [tandem-cuda](https://github.com/tandem-rng/tandem-cuda),
-[tandem-jax](https://github.com/tandem-rng/tandem-jax) and [tandem-r](https://github.com/tandem-rng/tandem-r).
+produces the stream the specification defines, bit for bit.
 
 - `tandem.wgsl`: the building blocks `T`, `F`, `F_keyed`, `block`, `split_key`, `sub_key`,
   and the `fill` entry point. WGSL has no 64-bit integers, so the 32x32 to 64 product of the
@@ -45,17 +42,16 @@ deno task test
 
 `tests/core.test.ts` checks the CPU building blocks against every vector of the specification
 (`tests/vectors.json`, a copy of the spec repository's file). `tests/gpu.test.ts` checks the
-GPU fill against the vectors and against dumps written by TandemRNG.jl (`tests/data`, shared
-with tandem-c) for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
+GPU fill against the vectors and against reference stream dumps in `tests/data`
+for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
 and across workgroup boundaries. The GPU tests skip when no adapter exists. CI runs them with
 a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
 `naga`, and fails when the embedded shader or the vectors drift.
 
 ## Speed
 
-The fill is compute bound on Apple GPUs at about 160 to 210 GiB/s, and every implementation
-of the algorithm lands there: TandemRNG.jl on Metal.jl, the WGSL shader under Chromium's
-Tint, and the shader under Deno's naga. The store ceiling of the same buffer and dispatch
+The fill is compute bound on Apple GPUs at about 160 to 210 GiB/s, under Chromium's Tint and
+under Deno's naga alike. The store ceiling of the same buffer and dispatch
 shape is 720 GiB/s. A submit and its completion cost about 0.4 ms on wgpu, so a single small
 fill is latency bound: batch fills in one submit or fill large buffers.
 
@@ -64,8 +60,6 @@ warm-up, load 3 to 8:
 
 | | GiB/s |
 |---|---|
-| TandemRNG.jl on Metal.jl, 2^26 words (UInt64 2^25: 163, Float32 2^26: 155) | 164 |
-| TandemRNG.jl on Metal.jl, 2^24 words | 126 |
 | Chromium (Dawn, Tint), 2^26 and 2^27 words, one fill per submit | 167 |
 | Chromium, 2^24 words, 16 fills per submit | 213 |
 | Deno 2.9 (wgpu, naga), 2^26 words, 32 fills per submit | 134 to 144 |
@@ -75,7 +69,7 @@ warm-up, load 3 to 8:
 Variants measured on this GPU and rejected, all within noise of the committed shader or
 slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no bounds check, workgroups
 of 64 or 128, four steps unrolled per store burst, a lane-major thread mapping, two chunks
-per invocation, and tandem-cuda's workgroup tile with 512-byte writes per SIMD group, which
+per invocation, and a workgroup tile with 512-byte writes per SIMD group, which
 measured four times slower. `deno task bench` prints the Deno rows and the ceiling.
 
 `demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
