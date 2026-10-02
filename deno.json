@@ -7,6 +7,18 @@
     "bench": "deno run tools/bench.ts",
     "build": "tsc -p tsconfig.json"
   },
-  "lint": { "rules": { "tags": ["recommended"] } },
-  "fmt": { "lineWidth": 100 }
+  "lint": {
+    "rules": {
+      "tags": [
+        "recommended"
+      ]
+    }
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "exclude": [
+      "tests/vectors.json",
+      "src/shader.ts"
+    ]
+  }
 }
