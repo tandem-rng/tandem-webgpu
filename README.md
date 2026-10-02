@@ -53,27 +53,30 @@ a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the 
 
 ## Speed
 
-Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7, load 3 to 8:
+The fill is compute bound on Apple GPUs at about 160 to 210 GiB/s, and every implementation
+of the algorithm lands there: TandemRNG.jl on Metal.jl, the WGSL shader under Chromium's
+Tint, and the shader under Deno's naga. The store ceiling of the same buffer and dispatch
+shape is 720 GiB/s. A submit and its completion cost about 0.4 ms on wgpu, so a single small
+fill is latency bound: batch fills in one submit or fill large buffers.
+
+Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7 after a
+warm-up, load 3 to 8:
 
 | | GiB/s |
 |---|---|
-| Deno 2.9 (wgpu, Metal), 2^26 words, one fill per submit | 18.5 |
-| Deno 2.9, 2^26 words, 32 fills per submit | 134 to 144 |
-| Chromium (Dawn, Metal), 2^24 words, one fill per submit | 89 |
-| Chromium, 2^26 and 2^27 words, one fill per submit | 167 |
+| TandemRNG.jl on Metal.jl, 2^26 words (UInt64 2^25: 163, Float32 2^26: 155) | 164 |
+| TandemRNG.jl on Metal.jl, 2^24 words | 126 |
+| Chromium (Dawn, Tint), 2^26 and 2^27 words, one fill per submit | 167 |
 | Chromium, 2^24 words, 16 fills per submit | 213 |
+| Deno 2.9 (wgpu, naga), 2^26 words, 32 fills per submit | 134 to 144 |
+| Deno 2.9, 2^26 words, one fill per submit | 18.5 |
 | store ceiling: one constant block per invocation, same buffer, 32 per submit | 700 to 720 |
 
-A submit and its completion cost about 0.4 ms on wgpu, so a single small fill is latency
-bound. The last row is the store ceiling of the same buffer and dispatch shape, and the
-fill's own strided store pattern reaches it with constant data, so the fill is compute bound
-at a fifth of the ceiling. Measured and rejected on this GPU, all within noise of the
-committed shader or slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no
-bounds check, workgroups of 64 or 128, four steps unrolled per store burst, a lane-major
-thread mapping, two chunks per invocation, and the workgroup tile with 512-byte writes per
-SIMD group from tandem-cuda, which measured four times slower (34 against 143 at K = 32).
-Dawn's shader compiler gives 20 to 50% more than wgpu's on the same source. `deno task
-bench` prints the first two rows and the ceiling.
+Variants measured on this GPU and rejected, all within noise of the committed shader or
+slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no bounds check, workgroups
+of 64 or 128, four steps unrolled per store burst, a lane-major thread mapping, two chunks
+per invocation, and tandem-cuda's workgroup tile with 512-byte writes per SIMD group, which
+measured four times slower. `deno task bench` prints the Deno rows and the ceiling.
 
 `demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
 open `/demo/`.
