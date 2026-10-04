@@ -1,6 +1,6 @@
 // The WebGPU fill: stream words in row order from an aligned bit position.
 
-import { align, checkK, DEFAULT_K, type Key, toFloat64 } from "./core.ts";
+import { align, checkK, DEFAULT_K, type Key, mapF64 } from "./core.ts";
 import { SHADER } from "./shader.ts";
 
 export type DType = "u8" | "u16" | "u32" | "u64" | "f32" | "f64";
@@ -406,7 +406,10 @@ function convert(bytes: ArrayBuffer, dtype: HostDType) {
       return new BigInt64Array(bytes);
     case "f32":
       return new Float32Array(bytes);
-    case "f64":
-      return Float64Array.from(new BigUint64Array(bytes), toFloat64);
+    case "f64": {
+      const out = new Float64Array(bytes);
+      mapF64(out, new Uint32Array(bytes), out.length);
+      return out;
+    }
   }
 }

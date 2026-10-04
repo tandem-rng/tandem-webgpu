@@ -151,7 +151,7 @@ const wordsOf = (a: ArrayBufferView) => new Uint32Array(a.buffer, a.byteOffset, 
 function mapF32(out: Float32Array, u: Uint32Array, n: number): void {
   for (let i = 0; i < n; i++) out[i] = (u[i] >>> 8) * 2 ** -24;
 }
-function mapF64(out: Float64Array, u: Uint32Array, n: number): void {
+export function mapF64(out: Float64Array, u: Uint32Array, n: number): void {
   for (let i = 0; i < n; i++) out[i] = (u[2 * i + 1] * 2097152 + (u[2 * i] >>> 11)) * 2 ** -53;
 }
 
