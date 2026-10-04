@@ -14,7 +14,8 @@ The install builds `dist/` through the `prepare` script. In a clone, Deno, Bun a
 later import `src/mod.ts` directly. The GPU path needs WebGPU. No dependencies.
 
 The stream is bit exact with the specification, and the CPU and GPU return the same values,
-except GPU normals and exponentials, which agree to 16 ulps plus 1e-6.
+except GPU normals, which agree to 16 ulps plus 1e-6, and GPU exponentials, which agree to
+8 ulps plus 1e-6.
 
 ## AI assistance
 
