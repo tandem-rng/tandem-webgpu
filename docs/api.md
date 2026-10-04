@@ -1,8 +1,29 @@
-# Notes
+# API
 
-Material moved out of the README, unchanged.
+```ts
+import { fill, fillCpu, requestDevice, seed, split, Tandem } from "tandem-webgpu";
 
-## What it provides
+const key = seed(42n);
+const rng = new Tandem(key);
+const xs = rng.fillF64(1 << 20);          // or rng.fillF64(out) to fill your own array
+const dice = rng.fillU32Below(1000, 6);
+const z = rng.fillNormalF64(1000);        // fillExponentialF64 likewise
+const worker = split(key, 7n);            // also sub(purpose), fork(n)
+
+const cpu = fillCpu({ key, count: 1000, dtype: "u32" });             // { values, position }
+const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" });
+```
+
+- `Tandem`: scalar draws, fills into new or caller arrays, and `atU32` random access.
+- `fillCpu`: the options and result of `fill`, on the CPU.
+- `fill`, `fillBuffer`, `fillMany`: GPU fills of u8 to u64, i8 to i64, f32, f64 and bool.
+- `fillBelow`, `nextBelow`: bounded integers by Lemire's method, width chosen from the range.
+- `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller normals, exact with tandem-c on CPU.
+- `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, same logarithm.
+- `seed`, `split`, `sub`, `fork`: keys and child generators.
+- Parallel use: a fill cut at any element boundary equals the whole fill (Appendix B).
+
+## Shaders and GPU fills
 
 - `tandem.wgsl`: the building blocks `T`, `F`, `F_keyed`, `block`, `split_key`, `sub_key`,
   and the `fill` entry point. WGSL has no 64-bit integers, so the 32x32 to 64 product of the
@@ -67,7 +88,7 @@ decomposition, as
 [Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
 of the specification shows.
 
-### CPU path
+## CPU path
 
 `Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
 `chunkLength`. It gives every draw the shaders give, with the same values, on any runtime.
@@ -115,115 +136,3 @@ read a window of eight rows ahead and step on from the last window of a chunk gr
 reseeding. The `atU32`, `atU64`, `atF32` and `atF64` reads compute one block each, which suits a
 single element at a far position.
 
-Fixtures of the other ports, in `tests/cross.json` (`tools/gen_cross.ts` rebuilds it):
-
-| Fixture | Commit |
-|---|---|
-| tandem-c `tests/cross_below.h`, `cross_fill_below.h`, `cross_normal.h`, `cross_exponential.h` | b049384 |
-| tandem-cuda `tests/cross_fill_below.h`, `cross_fill_normal.h`, `cross_fill_exponential.h` | c5c5725 |
-| the specification's `vectors.json` | f9a74ab |
-
-`cross_normal.h` has SHA-256 `e313b2f1cda2301f8c67cfae952219d4898df9a0623372965c39f6bb0edc7003`.
-The 1e6-pair normal dump of tandem-c's `tools/dump_normals.c`, at starts 0, 1, 77, 12345 and
-2^30, hashes to `cfae418807a7d5f91ecd3e42c33a00943690c6e4b888ee39206738783efe9ded`, and the
-exponential dump of `tools/dump_exponentials.c` to
-`5c035a4ef1368231d25a9c2f9201be2df3224e28a14549a50625d0db3770ef4e`. The tests reproduce both.
-
-
-## Tests
-
-```sh
-npm test                 # Node 24 or later
-bun test tests/core.test.ts tests/cpu.test.ts
-deno task test           # also the GPU tests
-```
-
-`tests/core.test.ts` and `tests/cpu.test.ts` use `node:test` and run on Node, Deno and Bun, and
-CI runs all three. `tests/core.test.ts` checks the CPU building blocks against every vector of
-the specification (`tests/vectors.json`, a copy of the spec repository's file). It also checks
-the `Tandem` class: its fills against every dump in `tests/data` at K = 32 and K = 8, its
-mixed-width draws, its fills from mid-stream positions, its derived generators, and the 2^64
-position bound. It checks the bounded draws and normals bit for bit against the fixtures above,
-and that a bounded fill cut at arbitrary element boundaries equals the whole fill at a position
-with rejections.
-
-`tests/cpu.test.ts` checks the exponentials against the fixtures of tandem-c and tandem-cuda
-and the two hashes above. It checks the emulated `fma64` and `fma32` against an exact BigInt
-oracle on random and on halfway cases, and the Horner steps of the three polynomials against the
-chain of exact fused steps. It checks that scalar draws equal the fills across rows, windows and
-chunk groups for K = 1, 8 and 32, from every bit offset for u8, u16 and bool, and that fills
-equal the `block` function at K = 1 and K = 65536. It checks fills into a caller array or
-`subarray`, empty fills of every kind, the width rule of `nextBelow` and `fillBelow`, normal
-and exponential fills cut at element boundaries, the 2^64 bound for draws and fills, and
-`fillCpu`.
-
-`tests/gpu.test.ts` checks the GPU fill against the vectors and against reference stream dumps
-in `tests/data` for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
-and across workgroup boundaries, the signed types against the dump bytes, and `bool` against the
-spec's bit vectors and the CPU class from a mid-word start. It also checks that `fillBuffer` with `floats` holds the
-mapped values and that without it the buffer keeps raw words. It checks that `fillMany` returns
-the same values as single fills for mixed dtypes, positions, K and caller buffers, and that `fill` can reuse a caller buffer across two fills. It checks the GPU bounded fills against the same fixtures and the CPU class across ranges with
-many rejections, K and start positions, and the GPU normals against the fixtures to 16 ulps
-plus 1e-6, against the CPU class across the two-dimensional pair dispatch, and in `fillMany`.
-It checks that `fillCpu` equals the GPU fill for every dtype and for bounded fills, and the
-normals within that tolerance. It checks that every dtype, bounded and normal fill, and
-`fillMany`, under a binding limit shrunk to a few windows, equals the unchunked fill, and that a
-fill just over the real limit of a software adapter equals the CPU class at the window boundary
-and the end. The GPU tests skip when no adapter exists. CI runs them with
-a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
-`naga`, and fails when the embedded shader or the vectors drift.
-
-
-## Speed
-
-The fill is compute bound on Apple GPUs at about 160 to 210 GiB/s, under Chromium's Tint and
-under Deno's naga alike. The store ceiling of the same buffer and dispatch
-shape is 720 GiB/s. A submit and its completion cost about 0.4 ms on wgpu, so a single small
-fill is latency bound: batch fills with `fillMany` or fill large buffers.
-
-Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7 after a
-warm-up:
-
-| | GiB/s |
-|---|---|
-| Chromium (Dawn, Tint), 2^26 and 2^27 words, one fill per submit | 167 |
-| Chromium, 2^24 words, 16 fills per submit | 213 |
-| Deno 2.9 (wgpu, naga), 2^26 words, 32 fills per submit | 134 to 144 |
-| Deno 2.9, 2^26 words, one fill per submit | 18.5 |
-| Deno, `fill_below` u32, range 1000, 2^26 words, 32 fills per submit | 131 |
-| Deno, `fill_below` u64, range 1000, 2^26 words (2^25 values), 32 fills per submit | 128 |
-| Deno, `fill_below` u32, range 2^31 + 1 (half of the draws reject), 32 fills per submit | 5 |
-| Deno, `fill_normal` f32, 2^26 values, 32 fills per submit | 62 |
-| store ceiling: one constant block per invocation, same buffer, 32 per submit | 700 to 720 |
-
-Variants measured on this GPU and rejected, all within noise of the committed shader or
-slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no bounds check, workgroups
-of 64 or 128, four steps unrolled per store burst, a lane-major thread mapping, two chunks
-per invocation, and a workgroup tile with 512-byte writes per SIMD group, which
-measured four times slower. `deno task bench` prints the Deno rows and the ceiling.
-
-A bounded fill costs the same as a plain fill until draws reject. A rejection derives a
-fallback key with three seeding functions and then draws on that stream, so the half-rejecting
-range above is the worst case and ranges far from 2^31 reject rarely. The normal fill is two
-passes, the uniform fill and an in-place pair pass, and runs at about 0.45 of the plain fill.
-
-`demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
-open `/demo/`.
-
-
-### CPU speed notes
-
-Measured on the Apple M4 Pro with Node 26 at 2^22 elements, best of five.
-
-- Plain multiply and add in place of the emulated fma runs Float64 normals at 111 Melem/s,
-  Float64 exponentials at 157 and Float32 normals at 150, about four times the exact form. It
-  changes 4 % of the Float64 normals and 0.1 % of the Float64 exponentials, by up to 5.5e-16
-  relative, and none of the Float32 normals in 4M samples.
-- A WASM build of tandem-c (zig cc, wasm32-wasi, -O2 -msimd128, run under Node) fills 3700 Melem/s
-  of u32, 1240 of f64 and 1290 of bounded u32, about four times this package. Its normals and
-  exponentials run at 9.6 and 12.5 Melem/s, slower than here, since WASM has no fma and the
-  library call is slow. It is not part of this package.
-- A 4-wide unrolled map from words to floats measured the same as the plain loop, and
-  a 16-bit-limb `mulHi` is 1.8 times faster than a double product in the lane loop.
-- GPU exponentials (`fillExponential`, `exponential_f32`) deviate from the tandem-cuda fixtures by
-  at most 0.9 ulp on the Apple M4 Pro under Deno, within the 8 ulps plus 1e-6 the tests allow.
