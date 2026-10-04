@@ -75,6 +75,15 @@ measured four times slower. `deno task bench` prints the Deno rows and the ceili
 `demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
 open `/demo/`.
 
+## AI assistance
+
+This port was written with the help of large language models under human
+direction. The design and the specification are human work, as is much of the
+Julia implementation. The code is tested bit for bit against every vector of
+the specification and against long stream dumps from the Julia implementation,
+and every value must match. The output does not depend on who or what wrote the
+code.
+
 ## License
 
 Apache License 2.0. See `LICENSE` and `NOTICE`.
