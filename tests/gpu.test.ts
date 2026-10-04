@@ -1,6 +1,6 @@
 // The GPU fill against the Julia dumps and the spec vectors. Skipped without an adapter.
 import { assertEquals } from "jsr:@std/assert@1";
-import { fill, fillBuffer, requestDevice, seed, toFloat32 } from "../src/mod.ts";
+import { fill, fillBuffer, fillMany, requestDevice, seed, toFloat32 } from "../src/mod.ts";
 import vectors from "./vectors.json" with { type: "json" };
 
 const adapter = await navigator.gpu?.requestAdapter();
@@ -109,3 +109,28 @@ Deno.test({ name: "fillBuffer floats: GPU-resident f32, mid-block start", ...gpu
   const words = new Uint32Array(await readBytes(plain.buffer, plain.byteOffset, plain.byteLength));
   assertEquals(words, raw);
 });
+
+Deno.test(
+  { name: "fillMany equals single fills, with mixed dtypes, K and buffers", ...gpu },
+  async () => {
+    const key = seed(9n);
+    const own = device!.createBuffer({ size: 4096, usage: 0x80 | 0x4 });
+    const items = [
+      { key, count: 1000, dtype: "u32" },
+      { key, position: 7n, count: 300, dtype: "u64", K: 8 },
+      { key: K1234, position: 3200n, count: 500, dtype: "f32", floats: true },
+      { key, position: 5n, count: 100, dtype: "u8", buffer: own },
+    ] as const;
+    const many = await fillMany(device!, items);
+    const types = [Uint32Array, BigUint64Array, Float32Array, Uint8Array];
+    for (const [i, item] of items.entries()) {
+      const { values, position } = await fill(device!, { ...item, buffer: undefined });
+      const got = new types[i](
+        await readBytes(many[i].buffer, many[i].byteOffset, many[i].byteLength),
+      );
+      assertEquals(got, values, `item ${i}`);
+      assertEquals(many[i].position, position);
+    }
+    assertEquals(many[3].buffer, own);
+  },
+);

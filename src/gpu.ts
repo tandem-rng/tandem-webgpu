@@ -54,16 +54,19 @@ export async function requestDevice(adapter?: GPUAdapter | null): Promise<GPUDev
   });
 }
 
-/**
- * Fill `count` values of `dtype` into a new storage buffer, as `count` scalar draws would.
- * The buffer holds whole 16-byte stream blocks from `blockStart`; the values begin at
- * `byteOffset` inside it. Use `fill` for a host array. The words are raw stream words, even
- * for `f32` and `f64`, unless `floats` is set.
- */
-export async function fillBuffer(
+type Placed = { buffer: GPUBuffer; byteOffset: number; byteLength: number; position: bigint };
+type Job = {
+  entry: "fill" | "fill_f32";
+  params: Uint32Array<ArrayBuffer>;
+  workgroups: number;
+  buffer: GPUBuffer;
+};
+
+/** Validate one fill, allocate its buffer and compute its dispatch. Touches no queue. */
+function plan(
   device: GPUDevice,
   { key, position = 0n, count, dtype, K = DEFAULT_K, buffer, floats = false }: FillOptions,
-): Promise<{ buffer: GPUBuffer; byteOffset: number; byteLength: number; position: bigint }> {
+): { placed: Placed; job?: Job } {
   checkK(K);
   if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
   const w = WIDTH[dtype];
@@ -78,19 +81,16 @@ export async function fillBuffer(
   if (buffer && buffer.size < nBlocks * 16) {
     throw new RangeError(`buffer holds ${buffer.size} bytes, the fill needs ${nBlocks * 16}`);
   }
-  buffer ??= device.createBuffer({
-    size: Math.max(16, nBlocks * 16),
-    usage: STORAGE | COPY_SRC,
-  });
-  if (nBlocks === 0) return { buffer, byteOffset, byteLength, position: p1 };
-
   const rowsPerGroup = BigInt(K);
   const g0 = (blockStart >> 3n) / rowsPerGroup;
   const g1 = ((blockEnd - 1n) >> 3n) / rowsPerGroup;
-  const workgroups = Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
+  const workgroups = nBlocks === 0 ? 0 : Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
   if (workgroups > 65535) {
     throw new RangeError("fill too large for one dispatch: split the fill by position");
   }
+  buffer ??= device.createBuffer({ size: Math.max(16, nBlocks * 16), usage: STORAGE | COPY_SRC });
+  const placed = { buffer, byteOffset, byteLength, position: p1 };
+  if (nBlocks === 0) return { placed };
 
   const params = new Uint32Array(12);
   params.set(key, 0);
@@ -100,29 +100,63 @@ export async function fillBuffer(
   params[7] = Number(blockStart >> 32n);
   params[8] = nBlocks;
   params[9] = K;
-  const uniform = device.createBuffer({
-    size: params.byteLength,
-    usage: UNIFORM | COPY_DST,
-  });
-  device.queue.writeBuffer(uniform, 0, params);
+  return { placed, job: { entry: floats ? "fill_f32" : "fill", params, workgroups, buffer } };
+}
 
-  const pipeline = await pipelineFor(device, floats ? "fill_f32" : "fill");
-  const bind = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: uniform } },
-      { binding: 1, resource: { buffer } },
-    ],
-  });
+/** Encode every job into one compute pass and submit once. */
+async function dispatch(device: GPUDevice, jobs: Job[]): Promise<void> {
+  if (jobs.length === 0) return;
+  const pipelines = new Map<Job["entry"], GPUComputePipeline>();
+  for (const { entry } of jobs) {
+    if (!pipelines.has(entry)) pipelines.set(entry, await pipelineFor(device, entry));
+  }
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bind);
-  pass.dispatchWorkgroups(workgroups);
+  const uniforms = jobs.map(({ entry, params, workgroups, buffer }) => {
+    const uniform = device.createBuffer({ size: params.byteLength, usage: UNIFORM | COPY_DST });
+    device.queue.writeBuffer(uniform, 0, params);
+    const pipeline = pipelines.get(entry)!;
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniform } },
+          { binding: 1, resource: { buffer } },
+        ],
+      }),
+    );
+    pass.dispatchWorkgroups(workgroups);
+    return uniform;
+  });
   pass.end();
   device.queue.submit([encoder.finish()]);
-  uniform.destroy();
-  return { buffer, byteOffset, byteLength, position: p1 };
+  for (const u of uniforms) u.destroy();
+}
+
+/**
+ * Fill several buffers with one command buffer and one submit, which costs one queue round
+ * trip instead of one per fill. Each item is a `fillBuffer` request. Every item is checked
+ * before anything is submitted. Items run in order, so two items may share a buffer.
+ */
+export async function fillMany(
+  device: GPUDevice,
+  items: readonly FillOptions[],
+): Promise<Placed[]> {
+  const planned = items.map((item) => plan(device, item));
+  await dispatch(device, planned.flatMap(({ job }) => job ?? []));
+  return planned.map(({ placed }) => placed);
+}
+
+/**
+ * Fill `count` values of `dtype` into a new storage buffer, as `count` scalar draws would.
+ * The buffer holds whole 16-byte stream blocks from `blockStart`; the values begin at
+ * `byteOffset` inside it. Use `fill` for a host array. The words are raw stream words, even
+ * for `f32` and `f64`, unless `floats` is set.
+ */
+export async function fillBuffer(device: GPUDevice, options: FillOptions): Promise<Placed> {
+  return (await fillMany(device, [options]))[0];
 }
 
 type Values<D extends DType> = D extends "u8" ? Uint8Array

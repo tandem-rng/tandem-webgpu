@@ -20,7 +20,7 @@ produces the stream the specification defines, bit for bit.
 ## Use
 
 ```ts
-import { fill, fillBuffer, fork, requestDevice, seed, split, Tandem } from "tandem-webgpu";
+import { fill, fillBuffer, fillMany, fork, requestDevice, seed, split, Tandem } from "tandem-webgpu";
 
 const device = await requestDevice();          // a device with the adapter's buffer limits
 const key = seed(42n);                          // 128-bit seed through the spec's whitening
@@ -29,6 +29,10 @@ const next = await fill(device, { key, position, count: 1000, dtype: "u32" });
 const worker = split(key, 7n);                  // by index, from the key alone
 const { children } = fork(key, position, 4);    // from the current block
 const { buffer } = await fillBuffer(device, { key, count: 1 << 24, dtype: "u32" }); // stays on the GPU
+const [a, b] = await fillMany(device, [         // one command buffer, one submit
+  { key, count: 1 << 20, dtype: "u32" },
+  { key: split(key, 1n), count: 1 << 20, dtype: "u32" },
+]);
 const floats = await fillBuffer(device, { key, count: 1 << 24, dtype: "f32", floats: true }); // f32 values
 
 const rng = Tandem.seed(42n);                   // small draws on the CPU, no device needed
@@ -43,7 +47,10 @@ words. `fill` of `f32` runs `fill_f32`, which applies the spec's mapping `(raw >
 the GPU, and `fill` of `f64` applies `(raw >> 11) * 2^-53` on the host. `fillBuffer` returns a
 storage buffer of whole 16-byte stream blocks plus the byte offset of the first value, holding
 raw words unless you pass `floats: true` with `dtype: "f32"`, which stores Float32 values for a
-later GPU stage. Pass `buffer` to write into your own. There is no `f64` on the GPU: WGSL has
+later GPU stage. Pass `buffer` to write into your own. `fillMany(device, items)` takes an array of the same
+options, encodes every dispatch into one compute pass and submits once, then returns one result
+per item in order. It checks all items before it submits, and items run in order, so they may
+share a buffer. There is no `f64` on the GPU: WGSL has
 no 64-bit float type, so `f64` stays a host mapping of the `u64` words.
 
 `Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
@@ -66,7 +73,8 @@ fills from mid-stream positions, its derived generators, and the 2^64 position b
 GPU fill against the vectors and against reference stream dumps in `tests/data`
 for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
 and across workgroup boundaries. It also checks that `fillBuffer` with `floats` holds the
-mapped values and that without it the buffer keeps raw words. The GPU tests skip when no adapter exists. CI runs them with
+mapped values and that without it the buffer keeps raw words. It checks that `fillMany` returns
+the same values as single fills for mixed dtypes, positions, K and caller buffers. The GPU tests skip when no adapter exists. CI runs them with
 a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
 `naga`, and fails when the embedded shader or the vectors drift.
 
@@ -75,7 +83,7 @@ a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the 
 The fill is compute bound on Apple GPUs at about 160 to 210 GiB/s, under Chromium's Tint and
 under Deno's naga alike. The store ceiling of the same buffer and dispatch
 shape is 720 GiB/s. A submit and its completion cost about 0.4 ms on wgpu, so a single small
-fill is latency bound: batch fills in one submit or fill large buffers.
+fill is latency bound: batch fills with `fillMany` or fill large buffers.
 
 Apple M4 Pro GPU, `fill_u32` into device memory with no readback, minimum of 7 after a
 warm-up:
