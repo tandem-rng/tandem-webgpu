@@ -9,7 +9,7 @@
 // place. Pair j is elements 2j and 2j + 1, so the pairs may straddle stream blocks, which a
 // separate pass handles without neighbour exchange.
 
-// Second uniform: (range lo, range hi) for the bounded fills, (slot, n, pairs) for the pairs.
+// Second uniform: (range lo, range hi) for the bounded fills, (slot, n, pairs, workgroups in x) for the pairs.
 @group(0) @binding(2) var<uniform> Q: vec4<u32>;
 
 const PURPOSE_BELOW_LO32: u32 = 0x4c573332u; // 0x424c573332 is the 32-bit purpose
@@ -222,8 +222,8 @@ fn store_f32(slot: u32, v: f32) {
 // One invocation per pair. The pairs are numbered over a 2-D dispatch, since one dimension
 // holds only 65535 workgroups.
 @compute @workgroup_size(THREADS)
-fn normal_pairs(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
-    let j = id.y * nw.x * THREADS + id.x;
+fn normal_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
+    let j = id.y * Q.w * THREADS + id.x;
     if (j >= Q.z) {
         return;
     }

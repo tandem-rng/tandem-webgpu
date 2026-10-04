@@ -154,7 +154,7 @@ function plan(
   if (y > MAX_WORKGROUPS) throw new RangeError("fill too large for one dispatch");
   const pairJob: Job = {
     entry: "normal_pairs",
-    extra: new Uint32Array([byteOffset / 4, count, pairs, 0]),
+    extra: new Uint32Array([byteOffset / 4, count, pairs, x]),
     workgroups: [x, y],
     buffer,
   };
