@@ -74,64 +74,68 @@ test("1e6 exponentials at five starts hash to the tandem-c dump", () => {
 });
 
 // erfc with fractional error under 1.2e-7 (Numerical Recipes' erfcc), far below the KS bound.
+const ERFC = [
+  -1.26551223,
+  1.00002368,
+  0.37409196,
+  0.09678418,
+  -0.18628806,
+  0.27886807,
+  -1.13520398,
+  1.48851587,
+  -0.82215223,
+  0.17087277,
+];
 function erfc(x: number): number {
   const z = Math.abs(x), t = 1 / (1 + 0.5 * z);
-  const r = t * Math.exp(
-    -z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
-                  t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 +
-                                  t * (-0.82215223 + t * 0.17087277)))))))),
-  );
+  let p = 0;
+  for (let k = ERFC.length - 1; k >= 0; k--) p = ERFC[k] + t * p;
+  const r = t * Math.exp(-z * z + p);
   return x >= 0 ? r : 2 - r;
 }
 
-test("1e7 exponentials and normals have the moments and law of Exp(1) and N(0, 1)", () => {
-  const n = 10_000_000, g = new Tandem(seed(31n));
-  // Raw moments 1 to 4 and their variances E[X^2k] - E[X^k]^2, checked to 5 standard errors.
-  const laws = [
-    {
-      name: "exponential",
-      m: [1, 2, 6, 24],
-      m2k: [2, 24, 720, 40320],
-      cdf: (x: number) => -Math.expm1(-x),
-    },
-    {
-      name: "normal",
-      m: [0, 1, 0, 3],
-      m2k: [1, 3, 15, 105],
-      cdf: (x: number) => 0.5 * erfc(-x / Math.SQRT2),
-    },
-  ];
-  for (
-    const [law, f64, f32] of [
-      [laws[0], g.fillExponentialF64(n), g.fillExponentialF32(n)],
-      [laws[1], g.fillNormalF64(n), g.fillNormalF32(n)],
-    ] as const
-  ) {
-    for (const x of [f64, f32]) {
-      const name = `${law.name} ${x instanceof Float64Array ? "f64" : "f32"}`;
-      const s = [0, 0, 0, 0];
-      for (let i = 0; i < n; i++) {
-        const v = x[i], v2 = v * v;
-        s[0] += v;
-        s[1] += v2;
-        s[2] += v2 * v;
-        s[3] += v2 * v2;
-      }
-      for (let k = 0; k < 4; k++) {
-        const se = Math.sqrt((law.m2k[k] - law.m[k] ** 2) / n);
-        assertEquals(Math.abs(s[k] / n - law.m[k]) < 5 * se, true, `${name} moment ${k + 1}`);
-      }
-      // Kolmogorov-Smirnov: sqrt(n) D under 1.95 is the 0.1 % critical value.
-      const sorted = x.slice().sort();
-      let d = 0;
-      for (let i = 0; i < n; i++) {
-        const c = law.cdf(sorted[i]);
-        d = Math.max(d, (i + 1) / n - c, c - i / n);
-      }
-      assertEquals(Math.sqrt(n) * d < 1.95, true, `${name} KS sqrt(n) D = ${Math.sqrt(n) * d}`);
+// Raw moments 1 to 4 and E[X^2k], whose difference with the squared moment is the variance.
+type Law = { m: number[]; m2k: number[]; cdf: (x: number) => number };
+const EXP1: Law = { m: [1, 2, 6, 24], m2k: [2, 24, 720, 40320], cdf: (x) => -Math.expm1(-x) };
+const NORMAL: Law = {
+  m: [0, 1, 0, 3],
+  m2k: [1, 3, 15, 105],
+  cdf: (x) => 0.5 * erfc(-x / Math.SQRT2),
+};
+const LAW_N = 10_000_000;
+
+// One test per law and precision, so each stays under Bun's 5 s default timeout.
+for (
+  const [name, law, draw] of [
+    ["exponential f64", EXP1, (g: Tandem) => g.fillExponentialF64(LAW_N)],
+    ["exponential f32", EXP1, (g: Tandem) => g.fillExponentialF32(LAW_N)],
+    ["normal f64", NORMAL, (g: Tandem) => g.fillNormalF64(LAW_N)],
+    ["normal f32", NORMAL, (g: Tandem) => g.fillNormalF32(LAW_N)],
+  ] as const
+) {
+  test(`1e7 ${name} draws have the first four moments and the KS law`, () => {
+    const x = draw(new Tandem(seed(31n))), n = x.length, s = [0, 0, 0, 0];
+    for (let i = 0; i < n; i++) {
+      const v = x[i], v2 = v * v;
+      s[0] += v;
+      s[1] += v2;
+      s[2] += v2 * v;
+      s[3] += v2 * v2;
     }
-  }
-});
+    for (let k = 0; k < 4; k++) {
+      const se = Math.sqrt((law.m2k[k] - law.m[k] ** 2) / n);
+      assertEquals(Math.abs(s[k] / n - law.m[k]) < 5 * se, true, `moment ${k + 1}`);
+    }
+    // Kolmogorov-Smirnov: sqrt(n) D under 1.95 is the 0.1 % critical value.
+    const sorted = x.slice().sort();
+    let d = 0;
+    for (let i = 0; i < n; i++) {
+      const c = law.cdf(sorted[i]);
+      d = Math.max(d, (i + 1) / n - c, c - i / n);
+    }
+    assertEquals(Math.sqrt(n) * d < 1.95, true, `KS sqrt(n) D = ${Math.sqrt(n) * d}`);
+  });
+}
 
 // A correctly rounded a * b + c from exact integers, the oracle for the emulated fma.
 function decompose(x: number): [bigint, number] {
