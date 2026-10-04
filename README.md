@@ -12,8 +12,8 @@ The stream is bit exact with the specification, and the CPU and GPU return the s
 npm install github:tandem-rng/tandem-webgpu
 ```
 
-Deno, Bun and Node 24 or later import `src/mod.ts` directly. Other runtimes use `npm run build`,
-which emits `dist/`. The GPU path needs WebGPU. No dependencies.
+The install builds `dist/`. In a clone, Deno, Bun and Node 24 or later import `src/mod.ts`
+directly. The GPU path needs WebGPU. No dependencies.
 
 ## Use
 
