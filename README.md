@@ -66,6 +66,12 @@ before it submits, and items run in order, so they may share a buffer.
 
 Deno runs the TypeScript directly. For browsers and Node, `npm run build` emits `dist/`.
 
+Parallel use: element `i` of a fill is draw `i`, so ranks, threads or devices that start at the
+position of their first element, or draw from `split(task)`, reproduce a serial run for any
+decomposition, as
+[Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
+of the specification shows.
+
 ## Tests
 
 ```sh
