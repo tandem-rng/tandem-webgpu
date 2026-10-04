@@ -53,7 +53,7 @@ on the host. There is no `f64` on the GPU: WGSL has no 64-bit float type, so `f6
 mapping of the `u64` words. `fillBuffer` returns a storage buffer of whole 16-byte stream blocks
 plus the byte offset of the first value. It holds raw words unless you pass `floats: true` with
 `dtype: "f32"`, which stores Float32 values for a later GPU stage. Pass `buffer` to write into
-your own.
+your own. `fill` leaves a buffer you pass alive and destroys only the buffers it creates.
 
 `fillMany(device, items)` takes an array of the same options, encodes every dispatch into one
 compute pass and submits once, then returns one result per item in order. It checks all items
@@ -81,7 +81,7 @@ for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
 and across workgroup boundaries, the signed types against the dump bytes, and `bool` against the
 spec's bit vectors and the CPU class from a mid-word start. It also checks that `fillBuffer` with `floats` holds the
 mapped values and that without it the buffer keeps raw words. It checks that `fillMany` returns
-the same values as single fills for mixed dtypes, positions, K and caller buffers. The GPU tests skip when no adapter exists. CI runs them with
+the same values as single fills for mixed dtypes, positions, K and caller buffers, and that `fill` can reuse a caller buffer across two fills. The GPU tests skip when no adapter exists. CI runs them with
 a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
 `naga`, and fails when the embedded shader or the vectors drift.
 

@@ -205,7 +205,7 @@ export async function fill<D extends HostDType>(
   const bytes = staging.getMappedRange().slice(byteOffset, byteOffset + byteLength);
   staging.unmap();
   staging.destroy();
-  buffer.destroy();
+  if (!options.buffer) buffer.destroy();
   return { values: convert(bytes, options.dtype) as Values<D>, position };
 }
 

@@ -124,7 +124,7 @@ Deno.test(
     const many = await fillMany(device!, items);
     const types = [Uint32Array, BigUint64Array, Float32Array, Uint8Array];
     for (const [i, item] of items.entries()) {
-      const { values, position } = await fill(device!, { ...item, buffer: undefined });
+      const { values, position } = await fill(device!, item);
       const got = new types[i](
         await readBytes(many[i].buffer, many[i].byteOffset, many[i].byteLength),
       );
@@ -174,3 +174,13 @@ Deno.test(
     assertEquals(next, position + BigInt(count));
   },
 );
+
+Deno.test({ name: "fill leaves a caller buffer alive for reuse", ...gpu }, async () => {
+  const key = seed(3n), buffer = device!.createBuffer({ size: 4096, usage: 0x80 | 0x4 });
+  const a = await fill(device!, { key, count: 100, dtype: "u32", buffer });
+  const b = await fill(device!, { key, position: a.position, count: 100, dtype: "u32", buffer });
+  const whole = (await fill(device!, { key, count: 200, dtype: "u32" })).values;
+  assertEquals(a.values, whole.subarray(0, 100));
+  assertEquals(b.values, whole.subarray(100));
+  buffer.destroy();
+});
