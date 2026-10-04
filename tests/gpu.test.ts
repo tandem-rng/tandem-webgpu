@@ -348,7 +348,9 @@ Deno.test(
       assertEquals(
         cpu.every((z, i) => near32(values[start + i], z)),
         true,
-        `from element ${start}`,
+        `from element ${start}: got ${values.slice(start, start + 8)} want ${cpu} limit ${
+          device!.limits.maxStorageBufferBindingSize
+        }`,
       );
     }
     assertEquals(values.length, n);
