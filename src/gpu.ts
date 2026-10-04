@@ -34,13 +34,24 @@ export type FillOptions = {
    * `buffer` must hold the blocks of that many draws. Computed in single precision with
    * the arithmetic of tandem-c, so values agree with other ports to 16 ulps plus 1e-6. An empty fill leaves the position unchanged. */
   normal?: boolean;
+  /** For `f32`: standard exponentials -log(1 - u), one uniform draw per element, with the
+   * polynomial logarithm of tandem-c. An empty fill leaves the position unchanged. The values
+   * agree with other ports within 8 ulps plus 1e-6, since WGSL does not promise the fused
+   * multiply-add. */
+  exponential?: boolean;
 };
 
 export type Fill<T> = { values: T; position: bigint };
 
 const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>>>();
 
-type Entry = "fill" | "fill_f32" | "fill_below32" | "fill_below64" | "normal_pairs";
+type Entry =
+  | "fill"
+  | "fill_f32"
+  | "fill_below32"
+  | "fill_below64"
+  | "normal_pairs"
+  | "exponential_f32";
 
 function pipelineFor(device: GPUDevice, entryPoint: Entry) {
   let byEntry = pipelines.get(device);
@@ -93,14 +104,27 @@ function windowBytes(device: GPUDevice, K: number): number {
 /** Validate one fill, allocate its buffer and compute its dispatches. Touches no queue. */
 function plan(
   device: GPUDevice,
-  { key, position = 0n, count, dtype, K = DEFAULT_K, buffer, floats = false, range, normal }:
-    FillOptions,
+  {
+    key,
+    position = 0n,
+    count,
+    dtype,
+    K = DEFAULT_K,
+    buffer,
+    floats = false,
+    range,
+    normal,
+    exponential,
+  }: FillOptions,
 ): { placed: Placed; jobs: Job[] } {
   checkK(K);
   const w = WIDTH[dtype];
   if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
   if (normal && (dtype !== "f32" || range !== undefined)) {
     throw new RangeError("normal applies to dtype f32 only, without range");
+  }
+  if (exponential && (dtype !== "f32" || range !== undefined || normal)) {
+    throw new RangeError("exponential applies to dtype f32 only, without range or normal");
   }
   if (range !== undefined && dtype !== "u32" && dtype !== "u64") {
     throw new RangeError("range applies to dtype u32 and u64 only");
@@ -126,7 +150,7 @@ function plan(
   }
   buffer ??= device.createBuffer({ size: Math.max(16, nBlocks * 16), usage: STORAGE | COPY_SRC });
   // A derived fill with no elements draws nothing, so it does not even align the position.
-  const derived = normal || range !== undefined;
+  const derived = normal || exponential || range !== undefined;
   const placed = {
     buffer,
     byteOffset,
@@ -137,7 +161,7 @@ function plan(
 
   const entry: Entry = range !== undefined
     ? (w === 32 ? "fill_below32" : "fill_below64")
-    : floats || normal
+    : floats || normal || exponential
     ? "fill_f32"
     : "fill";
   const extra = range !== undefined
@@ -165,6 +189,27 @@ function plan(
     params[9] = K;
     const workgroups = Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
     jobs.push({ entry, params, extra, workgroups: [workgroups, 1], buffer, offset, size });
+  }
+  if (exponential) {
+    // One element per invocation, laid over the elements after every fill window has written.
+    const slot0 = byteOffset / 4, perWindow = win / 4 - 64;
+    for (let j0 = 0; j0 < count; j0 += perWindow) {
+      const n = Math.min(perWindow, count - j0), start = slot0 + j0;
+      const offset = Math.floor(start * 4 / 256) * 256;
+      const size = Math.min(win, nBlocks * 16 - offset);
+      const groups = Math.ceil(n / PAIR_THREADS);
+      const x = Math.min(groups, MAX_WORKGROUPS), y = Math.ceil(groups / x);
+      if (y > MAX_WORKGROUPS) throw new RangeError("fill too large for one dispatch");
+      jobs.push({
+        entry: "exponential_f32",
+        extra: new Uint32Array([start - offset / 4, n, n, x]),
+        workgroups: [x, y],
+        buffer,
+        offset,
+        size,
+      });
+    }
+    return { placed, jobs };
   }
   if (!normal) return { placed, jobs };
 
@@ -314,6 +359,11 @@ export function fillBelow<D extends "u32" | "u64">(
 /** Standard normals as Float32 on the GPU, read back. See `FillOptions.normal`. */
 export function fillNormal(device: GPUDevice, options: Plain): Promise<Fill<Float32Array>> {
   return fill(device, { ...options, dtype: "f32", normal: true });
+}
+
+/** Standard exponentials as Float32 on the GPU, read back. See `FillOptions.exponential`. */
+export function fillExponential(device: GPUDevice, options: Plain): Promise<Fill<Float32Array>> {
+  return fill(device, { ...options, dtype: "f32", exponential: true });
 }
 
 /** Bits are unaligned to bytes, so read whole words that cover them and cut the bits out. */

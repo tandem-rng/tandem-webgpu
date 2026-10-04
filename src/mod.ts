@@ -21,5 +21,13 @@ export {
 export type { Key, State } from "./core.ts";
 export { fillCpu } from "./cpu.ts";
 export type { CpuFillOptions } from "./cpu.ts";
-export { fill, fillBelow, fillBuffer, fillMany, fillNormal, requestDevice } from "./gpu.ts";
+export {
+  fill,
+  fillBelow,
+  fillBuffer,
+  fillExponential,
+  fillMany,
+  fillNormal,
+  requestDevice,
+} from "./gpu.ts";
 export type { DType, Fill, FillOptions, HostDType, Values } from "./gpu.ts";

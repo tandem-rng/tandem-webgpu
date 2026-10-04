@@ -6,12 +6,7 @@ import type { Fill, FillOptions, HostDType, Values } from "./gpu.ts";
 
 export type CpuFillOptions<D extends HostDType> =
   & Omit<FillOptions, "buffer" | "floats" | "dtype">
-  & {
-    dtype: D;
-    /** For `f32` and `f64`: standard exponentials -ln(1 - u), one uniform draw per element.
-     * Not on the GPU. */
-    exponential?: boolean;
-  };
+  & { dtype: D };
 
 const WIDTH = {
   bool: 1,
@@ -29,7 +24,7 @@ const WIDTH = {
 
 /**
  * Fill `count` values of `dtype` as `count` scalar draws would, on the CPU. The options are
- * those of `fill` plus `exponential`, and `normal` also takes `f64`, which the GPU lacks. The
+ * those of `fill`, and `normal` and `exponential` also take `f64`, which the GPU lacks. The
  * signed types read the unsigned words two's complement and `bool` gives one stream bit per
  * element. The values equal the GPU's for every dtype and for bounded integers, and for
  * normals within the tolerance of Appendix A.

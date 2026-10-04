@@ -8,6 +8,8 @@
 // `normal_pairs` turns a buffer of f32 uniforms (from `fill_f32`) into Box-Muller pairs in
 // place. Pair j is elements 2j and 2j + 1, so the pairs may straddle stream blocks, which a
 // separate pass handles without neighbour exchange.
+//
+// `exponential_f32` turns a buffer of f32 uniforms into -ln(1 - u) in place, one per element.
 
 // Second uniform: (range lo, range hi) for the bounded fills, (slot, n, pairs, workgroups in x) for the pairs.
 @group(0) @binding(2) var<uniform> Q: vec4<u32>;
@@ -172,25 +174,29 @@ fn fill_below64(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) 
 const TWO_PI_HI: f32 = 6.2831855;
 const TWO_PI_LO: f32 = -1.7484555e-7;
 
-// Box-Muller of the uniforms (a, b) in single precision, the arithmetic of tandem-c. WGSL
-// leaves the accuracy of log, cos and sin to the implementation, and a software rasteriser
-// misses the tolerance, so the two functions are short series that need only fma and sqrt.
+// -2 ln x for x in (0, 1] in single precision, the arithmetic of tandem-c. WGSL leaves the
+// accuracy of log, cos and sin to the implementation, and a software rasteriser misses the
+// tolerance, so log and the angle functions are short series that need only fma and sqrt.
 //
-// ln(1 - a): 1 - a is exact and in (0, 1]. Split it as m 2^e with m in [sqrt(1/2), sqrt(2))
-// from its exponent bits, then ln m = 2 s (1 + z/3 + z^2/5 + ...) with s = (m - 1) / (m + 1)
-// and z = s^2 <= 0.03.
-//
-// cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle lies in
-// [-pi/4, pi/4] and Taylor series give cos and sin there. The quarter turn is a swap and a
-// sign change.
-fn normal_pair(a: f32, b: f32) -> vec2<f32> {
-    let bits = bitcast<u32>(1.0 - a) + 0x004afb0du;
+// x is split as m 2^e with m in [sqrt(1/2), sqrt(2)) from its exponent bits, then
+// ln m = 2 s (1 + z/3 + z^2/5 + ...) with s = (m - 1) / (m + 1) and z = s^2 <= 0.03.
+fn neg2_log(x: f32) -> f32 {
+    let bits = bitcast<u32>(x) + 0x004afb0du;
     let nk = f32(127i - i32(bits >> 23u));
     let m = bitcast<f32>((bits & 0x007fffffu) + 0x3f3504f3u);
     let s = (m - 1.0) / (m + 1.0);
     let z = s * s;
     let p = fma(z, fma(z, fma(z, 0.14275366, 0.20000061), 0.33333334), 1.0);
-    let r = sqrt(fma(nk, 1.38629150390625, (s * -4.0) * p) + nk * 2.857213530660374e-06);
+    return fma(nk, 2.857213530660374e-06, fma(nk, 1.38629150390625, (s * -4.0) * p));
+}
+
+// Box-Muller of the uniforms (a, b) in single precision.
+//
+// cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle lies in
+// [-pi/4, pi/4] and Taylor series give cos and sin there. The quarter turn is a swap and a
+// sign change.
+fn normal_pair(a: f32, b: f32) -> vec2<f32> {
+    let r = sqrt(neg2_log(1.0 - a));
 
     let q = u32(b * 4.0 + 0.5);
     let f = fma(-f32(q), 0.25, b);
@@ -233,4 +239,15 @@ fn normal_pairs(@builtin(global_invocation_id) id: vec3<u32>) {
     if (2u * j + 1u < Q.y) {
         store_f32(slot + 1u, z.y);
     }
+}
+
+// Standard exponentials in place over a buffer of f32 uniforms: e = -ln(1 - u), one invocation
+// per element, numbered over a 2-D dispatch as the pairs are. Q is (slot, n, n, workgroups in x).
+@compute @workgroup_size(THREADS)
+fn exponential_f32(@builtin(global_invocation_id) id: vec3<u32>) {
+    let j = id.y * Q.w * THREADS + id.x;
+    if (j >= Q.z) {
+        return;
+    }
+    store_f32(Q.x + j, 0.5 * neg2_log(1.0 - load_f32(Q.x + j)));
 }

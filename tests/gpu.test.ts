@@ -6,6 +6,7 @@ import {
   fillBelow,
   fillBuffer,
   fillCpu,
+  fillExponential,
   fillMany,
   fillNormal,
   requestDevice,
@@ -390,6 +391,35 @@ Deno.test({ name: "fillCpu equals the GPU fill for every dtype", ...gpu }, async
       );
     }
   }
+});
+
+Deno.test({ name: "exponentials match the tandem-cuda fixtures and the CPU", ...gpu }, async () => {
+  // 8 ulps plus 1e-6: WGSL does not promise the fused multiply-add of the reference.
+  const near = (got: number, want: number) =>
+    Math.abs(got - Math.fround(want)) <= 8 * 2 ** -23 * Math.abs(want) + 1e-6;
+  let worst = 0;
+  for (const [pos, n, want] of cross.CROSS_EXP32 as unknown as DeviceNormal[]) {
+    const { values, position } = await fillExponential(device!, {
+      key: FIXTURE_KEY,
+      position: BigInt(pos),
+      count: n,
+    });
+    assertEquals(values.every((e, i) => near(e, want[i])), true, `from ${pos}`);
+    assertEquals(position, align(BigInt(pos), 32) + 32n * BigInt(n));
+    values.forEach((e, i) => {
+      worst = Math.max(worst, Math.abs(e - Math.fround(want[i])) / 2 ** -23 / Math.abs(want[i]));
+    });
+  }
+  console.log(`worst exponential f32 deviation from the fixtures: ${worst.toFixed(2)} ulps`);
+  const key = seed(5n);
+  for (const [position, count, K] of [[1n, 100001, 32], [77n, 4099, 8]] as const) {
+    const gpuE = await fillExponential(device!, { key, position, count, K });
+    const cpuE = fillCpu({ key, position, count, K, dtype: "f32", exponential: true });
+    assertEquals(gpuE.position, cpuE.position);
+    assertEquals(cpuE.values.every((e, i) => near(gpuE.values[i], e)), true, `K=${K}`);
+  }
+  const empty = await fillExponential(device!, { key, position: 5n, count: 0 });
+  assertEquals(empty.position, 5n);
 });
 
 /** The same device with a smaller binding limit, so small fills take the chunked path. */
