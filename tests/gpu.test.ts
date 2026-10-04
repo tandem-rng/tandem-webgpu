@@ -338,8 +338,10 @@ Deno.test(
 Deno.test(
   { name: "normals equal the CPU class across the two-dimensional pair dispatch", ...gpu },
   async () => {
-    const key = seed(77n), position = 32n * 13n, n = (1 << 25) + 3;
+    const key = seed(77n), position = 128n * 13n, n = (1 << 25) - 1;
     const { values } = await fillNormal(device!, { key, position, count: n });
+    // The odd count draws 2^25 words, 128 MiB, the smallest binding limit seen (a software
+    // adapter), and still needs more pairs than one row of 65535 workgroups holds.
     // Pair 65535 * 256 is the first of the second dispatch row. Check around it and the end.
     for (const start of [2 * 65535 * 256 - 4, 2 * ((n - 1) >> 1) - 2]) {
       const cpu = new Tandem(key, { position: position + 32n * BigInt(start) }).fillNormalF32(
