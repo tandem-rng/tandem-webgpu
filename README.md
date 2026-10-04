@@ -4,7 +4,8 @@
 
 [Tandem8x32](https://github.com/tandem-rng/spec) for JavaScript: a WGSL shader fills the stream
 on the GPU, and the same package runs every draw on the CPU for Node, Deno, Bun and browsers.
-The stream is bit exact with the specification, and the CPU and GPU return the same values.
+The stream is bit exact with the specification, and the CPU and GPU return the same values,
+except GPU normals and exponentials, which agree to 16 ulps plus 1e-6.
 
 ## Install
 
