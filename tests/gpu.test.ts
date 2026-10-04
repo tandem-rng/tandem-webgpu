@@ -1,6 +1,6 @@
 // The GPU fill against the Julia dumps and the spec vectors. Skipped without an adapter.
 import { assertEquals } from "jsr:@std/assert@1";
-import { fill, requestDevice, seed } from "../src/mod.ts";
+import { fill, fillBuffer, requestDevice, seed, toFloat32 } from "../src/mod.ts";
 import vectors from "./vectors.json" with { type: "json" };
 
 const adapter = await navigator.gpu?.requestAdapter();
@@ -85,4 +85,27 @@ Deno.test({ name: "a fill that spans many workgroups and groups", ...gpu }, asyn
       .values;
   assertEquals(part, whole.subarray(start));
   assertEquals(whole.length, n);
+});
+
+async function readBytes(buffer: GPUBuffer, offset: number, length: number): Promise<ArrayBuffer> {
+  const staging = device!.createBuffer({ size: buffer.size, usage: 0x1 | 0x8 });
+  const encoder = device!.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffer, 0, staging, 0, buffer.size);
+  device!.queue.submit([encoder.finish()]);
+  await staging.mapAsync(0x1);
+  const bytes = staging.getMappedRange().slice(offset, offset + length);
+  staging.destroy();
+  return bytes;
+}
+
+Deno.test({ name: "fillBuffer floats: GPU-resident f32, mid-block start", ...gpu }, async () => {
+  const key = seed(42n), position = 32n * 5n, count = 1000;
+  const raw = (await fill(device!, { key, position, count, dtype: "u32" })).values;
+  const r = await fillBuffer(device!, { key, position, count, dtype: "f32", floats: true });
+  const floats = new Float32Array(await readBytes(r.buffer, r.byteOffset, r.byteLength));
+  assertEquals(floats, Float32Array.from(raw, toFloat32));
+  // Without the option the buffer keeps raw words.
+  const plain = await fillBuffer(device!, { key, position, count, dtype: "f32" });
+  const words = new Uint32Array(await readBytes(plain.buffer, plain.byteOffset, plain.byteLength));
+  assertEquals(words, raw);
 });

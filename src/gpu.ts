@@ -1,6 +1,6 @@
 // The WebGPU fill: stream words in row order from an aligned bit position.
 
-import { align, checkK, DEFAULT_K, type Key, toFloat32, toFloat64 } from "./core.ts";
+import { align, checkK, DEFAULT_K, type Key, toFloat64 } from "./core.ts";
 import { SHADER } from "./shader.ts";
 
 export type DType = "u8" | "u16" | "u32" | "u64" | "f32" | "f64";
@@ -21,20 +21,25 @@ export type FillOptions = {
   /** Write into this storage buffer instead of a new one. It must hold the whole blocks the
    * fill covers; `fillBuffer` reports that size when it allocates. */
   buffer?: GPUBuffer;
+  /** For `f32` only: store the spec's floats `(raw >> 8) * 2^-24` instead of raw words, so the
+   * buffer holds Float32 values ready for a later GPU stage. Default false. */
+  floats?: boolean;
 };
 
 export type Fill<T> = { values: T; position: bigint };
 
-const pipelines = new WeakMap<GPUDevice, Promise<GPUComputePipeline>>();
+const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>>>();
 
-function pipelineFor(device: GPUDevice): Promise<GPUComputePipeline> {
-  let p = pipelines.get(device);
+function pipelineFor(device: GPUDevice, entryPoint: "fill" | "fill_f32") {
+  let byEntry = pipelines.get(device);
+  if (!byEntry) pipelines.set(device, byEntry = new Map());
+  let p = byEntry.get(entryPoint);
   if (!p) {
     p = device.createComputePipelineAsync({
       layout: "auto",
-      compute: { module: device.createShaderModule({ code: SHADER }), entryPoint: "fill" },
+      compute: { module: device.createShaderModule({ code: SHADER }), entryPoint },
     });
-    pipelines.set(device, p);
+    byEntry.set(entryPoint, p);
   }
   return p;
 }
@@ -52,13 +57,15 @@ export async function requestDevice(adapter?: GPUAdapter | null): Promise<GPUDev
 /**
  * Fill `count` values of `dtype` into a new storage buffer, as `count` scalar draws would.
  * The buffer holds whole 16-byte stream blocks from `blockStart`; the values begin at
- * `byteOffset` inside it. Use `fill` for a host array.
+ * `byteOffset` inside it. Use `fill` for a host array. The words are raw stream words, even
+ * for `f32` and `f64`, unless `floats` is set.
  */
 export async function fillBuffer(
   device: GPUDevice,
-  { key, position = 0n, count, dtype, K = DEFAULT_K, buffer }: FillOptions,
+  { key, position = 0n, count, dtype, K = DEFAULT_K, buffer, floats = false }: FillOptions,
 ): Promise<{ buffer: GPUBuffer; byteOffset: number; byteLength: number; position: bigint }> {
   checkK(K);
+  if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
   const w = WIDTH[dtype];
   const p0 = align(position, w);
   const p1 = p0 + BigInt(w) * BigInt(count);
@@ -99,7 +106,7 @@ export async function fillBuffer(
   });
   device.queue.writeBuffer(uniform, 0, params);
 
-  const pipeline = await pipelineFor(device);
+  const pipeline = await pipelineFor(device, floats ? "fill_f32" : "fill");
   const bind = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
@@ -128,9 +135,12 @@ type Values<D extends DType> = D extends "u8" ? Uint8Array
 /** Fill on the GPU and read back a typed array of `dtype`, plus the successor position. */
 export async function fill<D extends DType>(
   device: GPUDevice,
-  options: FillOptions & { dtype: D },
+  options: Omit<FillOptions, "floats"> & { dtype: D },
 ): Promise<Fill<Values<D>>> {
-  const { buffer, byteOffset, byteLength, position } = await fillBuffer(device, options);
+  const { buffer, byteOffset, byteLength, position } = await fillBuffer(device, {
+    ...options,
+    floats: options.dtype === "f32",
+  });
   const staging = device.createBuffer({
     size: buffer.size,
     usage: MAP_READ | COPY_DST,
@@ -157,7 +167,7 @@ function convert(bytes: ArrayBuffer, dtype: DType) {
     case "u64":
       return new BigUint64Array(bytes);
     case "f32":
-      return Float32Array.from(new Uint32Array(bytes), toFloat32);
+      return new Float32Array(bytes);
     case "f64":
       return Float64Array.from(new BigUint64Array(bytes), toFloat64);
   }
