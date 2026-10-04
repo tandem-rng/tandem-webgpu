@@ -29,6 +29,29 @@ jobs:
       - run: deno task test
       - name: Embedded shader is current
         run: deno task embed && git diff --exit-code src/shader.ts
+  node:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [24, latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+  bun:
+    name: ubuntu-latest / bun
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun test tests/core.test.ts tests/cpu.test.ts
   build:
     name: npm build
     runs-on: ubuntu-latest
