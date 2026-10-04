@@ -18,6 +18,7 @@
     "lineWidth": 100,
     "exclude": [
       "tests/vectors.json",
+      "tests/cross.json",
       "src/shader.ts"
     ]
   }
