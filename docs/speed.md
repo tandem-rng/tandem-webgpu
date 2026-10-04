@@ -1,5 +1,7 @@
 # Speed
 
+`npm run bench:cpu` produces the CPU figures and `deno task bench` the Deno GPU rows.
+
 ## CPU
 
 CPU: Apple M4 Pro, Node 26, 2^22 elements, best of five (`npm run bench:cpu`).

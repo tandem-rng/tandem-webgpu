@@ -3,6 +3,7 @@
 # tandem-webgpu
 
 [![CI](https://github.com/tandem-rng/tandem-webgpu/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tandem-rng/tandem-webgpu/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-tandem--rng.github.io-7fb3ee.svg)](https://tandem-rng.github.io/tandem-webgpu/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 [Tandem8x32](https://github.com/tandem-rng/spec) for JavaScript: a WGSL shader fills the stream
@@ -32,4 +33,4 @@ See [API](docs/api.md), [tests](docs/tests.md) and [speed](docs/speed.md) for th
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](docs/index.md) · [Apache 2.0 license](LICENSE)
+[Documentation](https://tandem-rng.github.io/tandem-webgpu/) · [Apache 2.0 license](LICENSE)

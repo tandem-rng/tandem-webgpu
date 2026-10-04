@@ -1,4 +1,8 @@
-# tandem-webgpu documentation
+# tandem-webgpu
+
+Tandem8x32 for JavaScript: a WGSL shader fills the stream on the GPU, and the same package runs
+every draw on the CPU for Node, Deno, Bun and browsers. It produces the stream of the
+[specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) bit for bit.
 
 - [API](api.md): the CPU class, the GPU fills, the shaders and parallel use.
 - [Tests](tests.md): fixtures, hashes and what each suite checks.

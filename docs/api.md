@@ -1,5 +1,7 @@
 # API
 
+## Use
+
 ```ts
 import { fill, fillCpu, requestDevice, seed, split, Tandem } from "tandem-webgpu";
 
@@ -14,6 +16,8 @@ const cpu = fillCpu({ key, count: 1000, dtype: "u32" });             // { values
 const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" });
 ```
 
+## Reference
+
 - `Tandem`: scalar draws, fills into new or caller arrays, and `atU32` random access.
 - `fillCpu`: the options and result of `fill`, on the CPU.
 - `fill`, `fillBuffer`, `fillMany`: GPU fills of u8 to u64, i8 to i64, f32, f64 and bool.
@@ -21,7 +25,6 @@ const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" }
 - `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller normals, exact with tandem-c on CPU.
 - `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, same logarithm.
 - `seed`, `split`, `sub`, `fork`: keys and child generators.
-- Parallel use: a fill cut at any element boundary equals the whole fill (Appendix B).
 
 ## Shaders and GPU fills
 
@@ -82,12 +85,6 @@ straddle stream blocks at any start. There is no GPU `f64` normal, for lack of a
 Deno and Bun run the TypeScript directly, and so does Node 24 or later. For browsers and older
 Node, `npm run build` emits `dist/`.
 
-Parallel use: element `i` of a fill is draw `i`, so ranks, threads or devices that start at the
-position of their first element, or draw from `split(task)`, reproduce a serial run for any
-decomposition, as
-[Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
-of the specification shows.
-
 ## CPU path
 
 `Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
@@ -136,3 +133,10 @@ read a window of eight rows ahead and step on from the last window of a chunk gr
 reseeding. The `atU32`, `atU64`, `atF32` and `atF64` reads compute one block each, which suits a
 single element at a far position.
 
+## Parallel use
+
+A fill cut at any element boundary equals the whole fill. Element `i` of a fill is draw `i`, so
+ranks, threads or devices that start at the position of their first element, or draw from
+`split(task)`, reproduce a serial run for any decomposition, as
+[Appendix B](https://github.com/tandem-rng/spec/blob/main/SPEC.md#appendix-b-parallel-decomposition-non-normative)
+of the specification shows.

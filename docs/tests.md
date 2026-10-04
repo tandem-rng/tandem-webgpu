@@ -6,26 +6,10 @@ bun test tests/core.test.ts tests/cpu.test.ts
 deno task test           # also the GPU tests
 ```
 
-## Fixtures
+## Suite
 
-
-| Fixture | Commit |
-|---|---|
-| tandem-c `tests/cross_below.h`, `cross_fill_below.h`, `cross_normal.h`, `cross_exponential.h` | b049384 |
-| tandem-cuda `tests/cross_fill_below.h`, `cross_fill_normal.h`, `cross_fill_exponential.h` | c5c5725 |
-| the specification's `vectors.json` | f9a74ab |
-
-`cross_normal.h` has SHA-256 `e313b2f1cda2301f8c67cfae952219d4898df9a0623372965c39f6bb0edc7003`.
-The 1e6-pair normal dump of tandem-c's `tools/dump_normals.c`, at starts 0, 1, 77, 12345 and
-2^30, hashes to `cfae418807a7d5f91ecd3e42c33a00943690c6e4b888ee39206738783efe9ded`, and the
-exponential dump of `tools/dump_exponentials.c` to
-`5c035a4ef1368231d25a9c2f9201be2df3224e28a14549a50625d0db3770ef4e`. The tests reproduce both.
-
-
-## Suites
-
-`tests/core.test.ts` and `tests/cpu.test.ts` use `node:test` and run on Node, Deno and Bun, and
-CI runs all three. `tests/core.test.ts` checks the CPU building blocks against every vector of
+`tests/core.test.ts` and `tests/cpu.test.ts` use `node:test` and run on Node, Deno and Bun.
+`tests/core.test.ts` checks the CPU building blocks against every vector of
 the specification (`tests/vectors.json`, a copy of the spec repository's file). It also checks
 the `Tandem` class: its fills against every dump in `tests/data` at K = 32 and K = 8, its
 mixed-width draws, its fills from mid-stream positions, its derived generators, and the 2^64
@@ -55,7 +39,24 @@ It checks that `fillCpu` equals the GPU fill for every dtype and for bounded fil
 normals within that tolerance. It checks that every dtype, bounded and normal fill, and
 `fillMany`, under a binding limit shrunk to a few windows, equals the unchunked fill, and that a
 fill just over the real limit of a software adapter equals the CPU class at the window boundary
-and the end. The GPU tests skip when no adapter exists. CI runs them with
-a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
-`naga`, and fails when the embedded shader or the vectors drift.
+and the end. The GPU tests skip when no adapter exists.
 
+## Fixtures
+
+| Fixture | Commit |
+|---|---|
+| tandem-c `tests/cross_below.h`, `cross_fill_below.h`, `cross_normal.h`, `cross_exponential.h` | b049384 |
+| tandem-cuda `tests/cross_fill_below.h`, `cross_fill_normal.h`, `cross_fill_exponential.h` | c5c5725 |
+| the specification's `vectors.json` | f9a74ab |
+
+`cross_normal.h` has SHA-256 `e313b2f1cda2301f8c67cfae952219d4898df9a0623372965c39f6bb0edc7003`.
+The 1e6-pair normal dump of tandem-c's `tools/dump_normals.c`, at starts 0, 1, 77, 12345 and
+2^30, hashes to `cfae418807a7d5f91ecd3e42c33a00943690c6e4b888ee39206738783efe9ded`, and the
+exponential dump of `tools/dump_exponentials.c` to
+`5c035a4ef1368231d25a9c2f9201be2df3224e28a14549a50625d0db3770ef4e`. The tests reproduce both.
+
+## CI
+
+- CI runs `tests/core.test.ts` and `tests/cpu.test.ts` on Node, Deno and Bun.
+- CI runs the GPU tests with a software Vulkan adapter on Linux and on the macOS runner's GPU.
+- CI validates the shader with `naga`, and fails when the embedded shader or the vectors drift.
