@@ -255,7 +255,7 @@ export async function fillBuffer(device: GPUDevice, options: FillOptions): Promi
 export type HostDType = DType | "bool" | "i8" | "i16" | "i32" | "i64";
 type FillRequest<D> = Omit<FillOptions, "floats" | "dtype"> & { dtype: D };
 
-type Values<D extends HostDType> = D extends "u8" | "bool" ? Uint8Array
+export type Values<D extends HostDType> = D extends "u8" | "bool" ? Uint8Array
   : D extends "u16" ? Uint16Array
   : D extends "u32" ? Uint32Array
   : D extends "u64" ? BigUint64Array

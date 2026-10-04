@@ -5,6 +5,7 @@ import {
   fill,
   fillBelow,
   fillBuffer,
+  fillCpu,
   fillMany,
   fillNormal,
   requestDevice,
@@ -358,6 +359,38 @@ Deno.test(
     assertEquals(values.length, n);
   },
 );
+
+Deno.test({ name: "fillCpu equals the GPU fill for every dtype", ...gpu }, async () => {
+  const key = seed(91n);
+  for (const K of [32, 8]) {
+    for (const position of [0n, 1n, 77n, 12345n]) {
+      for (
+        const dtype of ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "f32", "f64"] as const
+      ) {
+        const options = { key, position, count: 1000, dtype, K };
+        assertEquals(
+          fillCpu(options),
+          await fill(device!, options),
+          `${dtype} K=${K} from ${position}`,
+        );
+      }
+      const bits = { key, position, count: 1000, dtype: "bool", K } as const;
+      assertEquals(fillCpu(bits), await fill(device!, bits), `bool K=${K} from ${position}`);
+      for (const [dtype, range] of [["u32", 1000], ["u32", 2147483649], ["u64", 1000n]] as const) {
+        const options = { key, position, count: 1000, dtype, K, range };
+        assertEquals(fillCpu(options), await fill(device!, options), `${dtype} range ${range}`);
+      }
+      const gpuNormal = await fillNormal(device!, { key, position, count: 1001, K });
+      const cpuNormal = fillCpu({ key, position, count: 1001, dtype: "f32", K, normal: true });
+      assertEquals(cpuNormal.position, gpuNormal.position);
+      assertEquals(
+        cpuNormal.values.every((z, i) => near32(gpuNormal.values[i], z)),
+        true,
+        `normal K=${K} from ${position}`,
+      );
+    }
+  }
+});
 
 /** The same device with a smaller binding limit, so small fills take the chunked path. */
 function withBindingLimit(real: GPUDevice, maxStorageBufferBindingSize: number): GPUDevice {

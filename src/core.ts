@@ -1,17 +1,21 @@
-// Tandem8x32 building blocks on the CPU: the step, the seeding function, key derivation
-// and the float mappings. 32-bit arithmetic via Math.imul and >>> 0, 64-bit via BigInt.
+// Tandem8x32 on the CPU: the step, the seeding function, key derivation, the float mappings
+// and the `Tandem` generator. Single steps use Math.imul and >>> 0, positions use BigInt, and
+// bulk output comes from the lane kernel in stream.ts.
+
+import { exponential32, exponential64, normalPairs32, normalPairs64 } from "./derived.ts";
+import { type Lanes, mulHi, newLanes, runRows, seedGroup, streamWords } from "./stream.ts";
 
 export type Key = readonly [number, number, number, number];
 export type State = { o: [number, number, number, number]; h: [number, number, number, number] };
 
-const CLOCK_WEYL = 0x9e3779b9;
-const DOMAIN_STREAM = 0x9e3779b9;
+export const CLOCK_WEYL = 0x9e3779b9;
+export const DOMAIN_STREAM = 0x9e3779b9;
 const DOMAIN_SPLIT = 0xbb67ae85;
 const DOMAIN_FORK = 0xd2511f53;
 const DOMAIN_FOLD = 0xcd9e8d57;
 const DOMAIN_SEED = 0xa54ff53a;
-const AUX_STREAM = 0x94d049bb;
-const RC = [
+export const AUX_STREAM = 0x94d049bb;
+export const RC = [
   0xd17cc1b7,
   0xa7220a94,
   0xfe13abe8,
@@ -26,14 +30,6 @@ export const DEFAULT_K = 32;
 const MASK32 = 0xffffffffn;
 
 const rotl = (x: number, r: number) => ((x << r) | (x >>> (32 - r))) >>> 0;
-
-/** High word of the 64-bit product, from 16-bit halves. */
-function mulHi(a: number, b: number): number {
-  const al = a & 0xffff, ah = a >>> 16, bl = b & 0xffff, bh = b >>> 16;
-  const lh = al * bh, hl = ah * bl;
-  const mid = ((al * bl) >>> 16) + (lh & 0xffff) + (hl & 0xffff);
-  return (ah * bh + (lh >>> 16) + (hl >>> 16) + (mid >>> 16)) >>> 0;
-}
 
 /** The step T: mix, clock, feedback. Mutates and returns `s`. */
 export function T(s: State): State {
@@ -130,27 +126,62 @@ export function checkK(K: number): void {
 }
 
 const POSITION_LIMIT = 1n << 64n;
+const LAST_ROW = POSITION_LIMIT - 1024n;
 // Purposes reserved for the fallback generators of bounded fills (Appendix A).
 const PURPOSE_BELOW = { 32: 0x424c573332n, 64: 0x424c573634n } as const;
-const TWO_PI = 2 * Math.PI;
+// A scalar draw reads this many rows ahead, so a cold position costs one window and not a chunk.
+const WINDOW_ROWS = 8;
+const RANGE32 = 2 ** 32;
+const MASK64 = (1n << 64n) - 1n;
+const pair = new Float64Array(2);
+const pairF = new Float32Array(2);
 
-/** cos and sin of 2 pi b for b in [0, 1). The nearest quarter turn comes off exactly, so the
- * double-precision angle in [-pi/4, pi/4] needs no range reduction. */
-function cosSin2Pi(b: number): [number, number] {
-  const q = Math.floor(b * 4 + 0.5);
-  const th = TWO_PI * (b - q / 4), c = Math.cos(th), s = Math.sin(th);
-  return [[c, -s, -c, s][q & 3], [s, c, -s, -c][q & 3]];
+/** An output array: the caller's, filled in place, or a new one of length n. */
+function target<A extends ArrayBufferView & { length: number }>(
+  make: new (n: number) => A,
+  n: number | A,
+): A {
+  return typeof n === "number" ? new make(n) : n;
+}
+
+/** The words of a typed array's bytes. Its offset and length are word multiples here. */
+const wordsOf = (a: ArrayBufferView) => new Uint32Array(a.buffer, a.byteOffset, a.byteLength >> 2);
+
+/** Uniforms from stream words, in place: the (raw >> 8) 2^-24 and (raw >> 11) 2^-53 maps. */
+function mapF32(out: Float32Array, u: Uint32Array, n: number): void {
+  for (let i = 0; i < n; i++) out[i] = (u[i] >>> 8) * 2 ** -24;
+}
+function mapF64(out: Float64Array, u: Uint32Array, n: number): void {
+  for (let i = 0; i < n; i++) out[i] = (u[2 * i + 1] * 2097152 + (u[2 * i] >>> 11)) * 2 ** -53;
+}
+
+function checkRange32(range: number): void {
+  if (!Number.isInteger(range) || range < 0 || range > RANGE32) {
+    throw new RangeError("range must be an integer in [0, 2^32]");
+  }
+}
+function checkRange64(range: bigint): void {
+  if (range < 0n || range > POSITION_LIMIT) throw new RangeError("range must be in [0, 2^64]");
 }
 
 /**
  * A stream generator on the CPU: a key, a bit position and a chunk length. Scalar draws,
- * fills and derived generators follow section 5 and 6 of the specification. Each draw
- * costs one `block` call per 16 bytes, so use `fill` on the GPU for bulk output.
+ * fills and derived generators follow section 5 and 6 of the specification and Appendix A,
+ * on every engine with the same values as the GPU path. Fills take a count and return a new
+ * typed array, or take a typed array and fill it in place.
  */
 export class Tandem {
   #key: Key;
-  #position: bigint;
   #K: number;
+  // The position is the bit offset `#off` inside the row that starts at bit `#rowBase`.
+  #rowBase = 0n;
+  #off = 0;
+  #last = false;
+  #win: Uint32Array | undefined;
+  #winWords = 0; // 0 while the window is stale
+  #wi = 0; // word index of the current row inside the window
+  #lanes: Lanes | undefined;
+  #lanesAt = -1n; // the row the lanes step to next
   #cacheIndex = -1n;
   #cache: Key = [0, 0, 0, 0];
 
@@ -158,8 +189,8 @@ export class Tandem {
     checkK(K);
     if (position < 0n || position >= POSITION_LIMIT) throw new RangeError("position out of range");
     this.#key = [key[0], key[1], key[2], key[3]];
-    this.#position = position;
     this.#K = K;
+    this.#setPosition(position);
   }
 
   static seed(z: bigint, K: number = DEFAULT_K): Tandem {
@@ -170,10 +201,51 @@ export class Tandem {
     return this.#key;
   }
   get position(): bigint {
-    return this.#position;
+    return this.#rowBase + BigInt(this.#off);
   }
   get chunkLength(): number {
     return this.#K;
+  }
+
+  #setPosition(p: bigint): void {
+    this.#rowBase = p & ~1023n;
+    this.#off = Number(p & 1023n);
+    this.#last = this.#rowBase === LAST_ROW;
+    this.#winWords = 0;
+  }
+
+  /** The bit offset of the next w-bit draw inside its row, with that row in the window. */
+  #reserve(w: number): number {
+    let o = (this.#off + w - 1) & ~(w - 1);
+    if (o + w > 1024) {
+      if (this.#last) throw new RangeError("position past 2^64 bits");
+      this.#rowBase += 1024n;
+      this.#last = this.#rowBase === LAST_ROW;
+      this.#wi += 32;
+      if (this.#wi >= this.#winWords) this.#winWords = 0;
+      o = 0;
+    }
+    if (this.#last && o + w >= 1024) throw new RangeError("position past 2^64 bits");
+    if (this.#winWords === 0) this.#load();
+    this.#off = o + w;
+    return o;
+  }
+
+  /** Fill the window from the row at the position. Stepping on from the last window of a chunk
+   * group reuses the lane state, and any other jump reseeds the group. */
+  #load(): void {
+    const K = BigInt(this.#K), row = this.#rowBase >> 10n, j = Number(row % K);
+    const take = Math.min(WINDOW_ROWS, this.#K - j);
+    const lanes = this.#lanes ??= newLanes(), win = this.#win ??= new Uint32Array(WINDOW_ROWS * 32);
+    if (this.#lanesAt === row && j > 0) {
+      runRows(lanes, 0, take, win, 0);
+    } else {
+      seedGroup(this.#key, row / K, lanes);
+      runRows(lanes, j, take, win, 0);
+    }
+    this.#lanesAt = row + BigInt(take);
+    this.#winWords = 32 * take;
+    this.#wi = 0;
   }
 
   /** The stream block with index n: row n >> 3, lane n & 7. */
@@ -202,166 +274,311 @@ export class Tandem {
     return p;
   }
 
-  #draw(w: number): number | bigint {
-    const p = this.#span(this.#position, 1n, w);
-    const x = this.#read(p, w);
-    this.#position = p + BigInt(w);
-    return x;
-  }
-
-  #each(n: number, w: number, set: (i: number, raw: number | bigint) => void): void {
-    const p = this.#span(this.#position, BigInt(n), w);
-    for (let i = 0; i < n; i++) set(i, this.#read(p + BigInt(w * i), w));
-    this.#position = p + BigInt(w) * BigInt(n);
-  }
-
   #at(i: bigint | number, w: number): number | bigint {
     const k = BigInt(i);
-    return this.#read(this.#span(this.#position, k + 1n, w) + BigInt(w) * k, w);
+    return this.#read(this.#span(this.position, k + 1n, w) + BigInt(w) * k, w);
+  }
+
+  /** One word of the current row's window, after a #reserve. */
+  #word(o: number): number {
+    return this.#win![this.#wi + (o >> 5)];
   }
 
   nextBool(): boolean {
-    return this.#draw(1) === 1;
+    const o = this.#reserve(1);
+    return ((this.#word(o) >>> (o & 31)) & 1) === 1;
   }
   nextU8(): number {
-    return this.#draw(8) as number;
+    const o = this.#reserve(8);
+    return (this.#word(o) >>> (o & 31)) & 0xff;
   }
   nextU16(): number {
-    return this.#draw(16) as number;
+    const o = this.#reserve(16);
+    return (this.#word(o) >>> (o & 31)) & 0xffff;
   }
   nextU32(): number {
-    return this.#draw(32) as number;
+    return this.#word(this.#reserve(32));
+  }
+  /** A 64-bit draw as its low and high word, which needs no BigInt. */
+  nextU64Pair(): [number, number] {
+    const o = this.#reserve(64), i = this.#wi + (o >> 5), win = this.#win!;
+    return [win[i], win[i + 1]];
   }
   nextU64(): bigint {
-    return this.#draw(64) as bigint;
+    const [lo, hi] = this.nextU64Pair();
+    return (BigInt(hi) << 32n) | BigInt(lo);
   }
   nextF32(): number {
-    return toFloat32(this.nextU32());
+    return (this.nextU32() >>> 8) * 2 ** -24;
   }
   nextF64(): number {
-    return toFloat64(this.nextU64());
+    const [lo, hi] = this.nextU64Pair();
+    return (hi * 2097152 + (lo >>> 11)) * 2 ** -53;
   }
 
-  fillU32(n: number): Uint32Array {
-    const out = new Uint32Array(n);
-    this.#each(n, 32, (i, x) => out[i] = x as number);
+  /** Stream words for `count` draws of width w into `out`, then move past them. Checks the
+   * endpoint before it writes. Returns the aligned start bit. */
+  #stream(out: Uint32Array, count: number, w: number): bigint {
+    const p = this.#span(this.position, BigInt(count), w);
+    streamWords(this.#key, this.#K, p >> 5n, out, 0, out.length);
+    this.#setPosition(p + BigInt(w) * BigInt(count));
+    return p;
+  }
+
+  /** A fill of w-bit values smaller than a word, cut out of the covering words. */
+  #fillBytes<A extends ArrayBufferView & { length: number }>(
+    make: new (n: number) => A,
+    n: number | A,
+    w: 8 | 16,
+  ): A {
+    const out = target(make, n), count = out.length;
+    const p = this.#span(this.position, BigInt(count), w);
+    const skip = Number(p & 31n) >> 3, bytes = count * (w >> 3);
+    const tmp = new Uint32Array((skip + bytes + 3) >> 2);
+    streamWords(this.#key, this.#K, p >> 5n, tmp, 0, tmp.length);
+    new Uint8Array(out.buffer, out.byteOffset, out.byteLength).set(
+      new Uint8Array(tmp.buffer, skip, bytes),
+    );
+    this.#setPosition(p + BigInt(w) * BigInt(count));
     return out;
   }
-  fillU64(n: number): BigUint64Array {
-    const out = new BigUint64Array(n);
-    this.#each(n, 64, (i, x) => out[i] = x as bigint);
+
+  fillU8(n: number | Uint8Array): Uint8Array {
+    return this.#fillBytes(Uint8Array, n, 8);
+  }
+  fillU16(n: number | Uint16Array): Uint16Array {
+    return this.#fillBytes(Uint16Array, n, 16);
+  }
+  fillU32(n: number | Uint32Array): Uint32Array {
+    const out = target(Uint32Array, n);
+    this.#stream(out, out.length, 32);
     return out;
   }
-  fillF32(n: number): Float32Array {
-    const out = new Float32Array(n);
-    this.#each(n, 32, (i, x) => out[i] = toFloat32(x as number));
+  fillU64(n: number | BigUint64Array): BigUint64Array {
+    const out = target(BigUint64Array, n);
+    this.#stream(wordsOf(out), out.length, 64);
     return out;
   }
-  fillF64(n: number): Float64Array {
-    const out = new Float64Array(n);
-    this.#each(n, 64, (i, x) => out[i] = toFloat64(x as bigint));
+  /** Bits of the stream from the position, one 0 or 1 per element. */
+  fillBool(n: number | Uint8Array): Uint8Array {
+    const out = target(Uint8Array, n), count = out.length, p = this.position;
+    if (p + BigInt(count) >= POSITION_LIMIT) throw new RangeError("position past 2^64 bits");
+    const skip = Number(p & 31n), tmp = new Uint32Array((skip + count + 31) >> 5);
+    streamWords(this.#key, this.#K, p >> 5n, tmp, 0, tmp.length);
+    for (let i = 0; i < count; i++) out[i] = (tmp[(skip + i) >> 5] >>> ((skip + i) & 31)) & 1;
+    this.#setPosition(p + BigInt(count));
+    return out;
+  }
+  fillF32(n: number | Float32Array): Float32Array {
+    const out = target(Float32Array, n);
+    this.#stream(wordsOf(out), out.length, 32);
+    mapF32(out, wordsOf(out), out.length);
+    return out;
+  }
+  fillF64(n: number | Float64Array): Float64Array {
+    const out = target(Float64Array, n);
+    this.#stream(wordsOf(out), out.length, 64);
+    mapF64(out, wordsOf(out), out.length);
     return out;
   }
 
   /** One draw in [0, range) by Lemire's method, rejecting on the draws that follow. A range of
    * 0 gives 0 and consumes one draw. */
   nextU32Below(range: number): number {
-    return Number(this.#drawBelow(BigInt(range), 32, () => BigInt(this.nextU32())));
+    checkRange32(range);
+    const x = this.nextU32();
+    if (range === RANGE32) return x;
+    let lo = Math.imul(x, range) >>> 0, hi = mulHi(x, range);
+    if (lo < range) {
+      const t = (RANGE32 - range) % range;
+      while (lo < t) {
+        const y = this.nextU32();
+        lo = Math.imul(y, range) >>> 0;
+        hi = mulHi(y, range);
+      }
+    }
+    return hi;
   }
   nextU64Below(range: bigint): bigint {
-    return this.#drawBelow(range, 64, () => this.nextU64());
+    checkRange64(range);
+    let m = this.nextU64() * range;
+    if ((m & MASK64) < range) {
+      const t = (POSITION_LIMIT - range) % range;
+      while ((m & MASK64) < t) m = this.nextU64() * range;
+    }
+    return m >> 64n;
   }
 
-  /** Lemire over the draws of `next`; the first draw `x` is already taken by the caller's
-   * `next`, and each rejection takes another. */
-  #drawBelow(range: bigint, w: 32 | 64, next: () => bigint, first = next()): bigint {
-    if (range === 0n) return 0n;
-    const W = BigInt(w), mask = (1n << W) - 1n;
-    let m = first * range;
-    if ((m & mask) < range) {
-      const t = ((1n << W) - range) % range;
-      while ((m & mask) < t) m = next() * range;
+  /** A bounded draw whose width follows the range, as the specification asks of an interface
+   * that names only the result type: 32-bit draws up to 2^32, else 64-bit. The width does not
+   * change the values. */
+  nextBelow(range: number): number;
+  nextBelow(range: bigint): bigint;
+  nextBelow(range: number | bigint): number | bigint {
+    if (typeof range === "number") {
+      if (range > RANGE32) throw new RangeError("a number range is at most 2^32, use a bigint");
+      return this.nextU32Below(range);
     }
-    return m >> W;
+    return range <= BigInt(RANGE32)
+      ? BigInt(this.nextU32Below(Number(range)))
+      : this.nextU64Below(range);
   }
 
   /**
-   * A bounded fill of n values in [0, range), as in Appendix A. It consumes exactly n draws,
-   * and a rejected draw retries on the fallback generator of its global draw index, so a fill
-   * cut at any element boundary equals the whole fill. An empty fill moves nothing.
+   * A bounded fill of values in [0, range), as in Appendix A. It consumes exactly one draw per
+   * element, and a rejected draw retries on the fallback generator of its global draw index,
+   * so a fill cut at any element boundary equals the whole fill. An empty fill moves nothing.
    */
-  fillU32Below(n: number, range: number): Uint32Array {
-    const out = new Uint32Array(n);
-    this.#fillBelow(n, BigInt(range), 32, (i, x) => out[i] = Number(x));
-    return out;
-  }
-  fillU64Below(n: number, range: bigint): BigUint64Array {
-    const out = new BigUint64Array(n);
-    this.#fillBelow(n, range, 64, (i, x) => out[i] = x);
-    return out;
-  }
-
-  #fillBelow(n: number, range: bigint, w: 32 | 64, set: (i: number, x: bigint) => void): void {
-    if (n === 0) return;
-    const p = this.#span(this.#position, BigInt(n), w), g0 = p / BigInt(w);
-    for (let i = 0; i < n; i++) {
-      const raw = BigInt(this.#read(p + BigInt(w * i), w));
-      const fallback = () => this.sub(PURPOSE_BELOW[w]).split(g0 + BigInt(i));
-      let retry: Tandem | undefined;
-      set(
-        i,
-        this.#drawBelow(range, w, () => {
-          retry ??= fallback();
-          return BigInt(w === 32 ? retry.nextU32() : retry.nextU64());
-        }, raw),
-      );
+  fillU32Below(n: number | Uint32Array, range: number): Uint32Array {
+    checkRange32(range);
+    const out = target(Uint32Array, n), count = out.length;
+    if (count === 0) return out;
+    const g0 = this.#stream(out, count, 32) >> 5n;
+    if (range === RANGE32) return out;
+    if (range === 0) return out.fill(0);
+    const t = (RANGE32 - range) % range;
+    for (let i = 0; i < count; i++) {
+      const x = out[i], lo = Math.imul(x, range) >>> 0;
+      if (lo < t) out[i] = this.#retry32(g0 + BigInt(i), range, t);
+      else out[i] = mulHi(x, range);
     }
-    this.#position = p + BigInt(w) * BigInt(n);
+    return out;
+  }
+  fillU64Below(n: number | BigUint64Array, range: bigint): BigUint64Array {
+    checkRange64(range);
+    const out = target(BigUint64Array, n), count = out.length;
+    if (count === 0) return out;
+    const g0 = this.#stream(wordsOf(out), count, 64) >> 6n;
+    if (range === 0n) return out.fill(0n);
+    const t = (POSITION_LIMIT - range) % range;
+    for (let i = 0; i < count; i++) {
+      const m = out[i] * range;
+      if ((m & MASK64) < t) out[i] = this.#retry64(g0 + BigInt(i), range, t);
+      else out[i] = m >> 64n;
+    }
+    return out;
+  }
+  /** The result-typed bounded fill: a Uint32Array for a number range, a BigUint64Array for a
+   * bigint one, with the draw width chosen from the range as in `nextBelow`. */
+  fillBelow(n: number | Uint32Array, range: number): Uint32Array;
+  fillBelow(n: number | BigUint64Array, range: bigint): BigUint64Array;
+  fillBelow(
+    n: number | Uint32Array | BigUint64Array,
+    range: number | bigint,
+  ): Uint32Array | BigUint64Array {
+    if (typeof range === "number") return this.fillU32Below(n as number | Uint32Array, range);
+    if (range > BigInt(RANGE32)) return this.fillU64Below(n as number | BigUint64Array, range);
+    const out = target(BigUint64Array, n as number | BigUint64Array);
+    const narrow = this.fillU32Below(out.length, Number(range));
+    for (let i = 0; i < out.length; i++) out[i] = BigInt(narrow[i]);
+    return out;
   }
 
-  /** A standard normal from two uniform draws, the cosine half of the Box-Muller pair. */
+  /** The draws of the fallback generator for global draw index g, until one is accepted. */
+  #fallback(w: 32 | 64, g: bigint): Tandem {
+    return new Tandem(split(sub(this.#key, PURPOSE_BELOW[w]), g), { K: this.#K });
+  }
+  #retry32(g: bigint, range: number, t: number): number {
+    const r = this.#fallback(32, g);
+    for (;;) {
+      const x = r.nextU32();
+      if ((Math.imul(x, range) >>> 0) >= t) return mulHi(x, range);
+    }
+  }
+  #retry64(g: bigint, range: bigint, t: bigint): bigint {
+    const r = this.#fallback(64, g);
+    for (;;) {
+      const m = r.nextU64() * range;
+      if ((m & MASK64) >= t) return m >> 64n;
+    }
+  }
+
+  /**
+   * A standard normal pair from two uniform draws by Box-Muller, cosine half first, with the
+   * polynomial arithmetic of tandem-c, which makes the values equal to its bit for bit. The
+   * Float32 versions draw Float32 uniforms and compute in single precision.
+   */
+  nextNormal2F64(): [number, number] {
+    pair[0] = this.nextF64();
+    pair[1] = this.nextF64();
+    normalPairs64(pair, 1);
+    return [pair[0], pair[1]];
+  }
+  nextNormal2F32(): [number, number] {
+    pairF[0] = this.nextF32();
+    pairF[1] = this.nextF32();
+    normalPairs32(pairF, 1);
+    return [pairF[0], pairF[1]];
+  }
+  /** The cosine half of the pair, which consumes both draws. */
   nextNormalF64(): number {
-    return this.#pairF64()[0];
+    return this.nextNormal2F64()[0];
   }
   nextNormalF32(): number {
-    return this.#pairF32()[0];
+    return this.nextNormal2F32()[0];
   }
 
   /**
    * Standard normals by Box-Muller. Elements 2j and 2j + 1 come from uniform draws 2j and
-   * 2j + 1, so an odd n still consumes both draws of its last pair.
+   * 2j + 1, so an odd n still consumes both draws of its last pair. An empty fill moves
+   * nothing.
    */
-  fillNormalF64(n: number): Float64Array {
-    const out = new Float64Array(n);
-    for (let i = 0; i < n; i += 2) {
-      const z = this.#pairF64();
-      out[i] = z[0];
-      if (i + 1 < n) out[i + 1] = z[1];
-    }
+  fillNormalF64(n: number | Float64Array): Float64Array {
+    const out = target(Float64Array, n), count = out.length, pairs = count >> 1;
+    if (count === 0) return out;
+    this.#uniformsF64(out, pairs * 2);
+    normalPairs64(out, pairs);
+    if (count & 1) out[count - 1] = this.nextNormal2F64()[0];
     return out;
   }
-  /** Float32 normals from Float32 uniforms: the angle is taken in double and `cos` and `sin`
-   * are rounded to Float32, which is how the specification asks for it. */
-  fillNormalF32(n: number): Float32Array {
-    const out = new Float32Array(n);
-    for (let i = 0; i < n; i += 2) {
-      const z = this.#pairF32();
-      out[i] = z[0];
-      if (i + 1 < n) out[i + 1] = z[1];
-    }
+  fillNormalF32(n: number | Float32Array): Float32Array {
+    const out = target(Float32Array, n), count = out.length, pairs = count >> 1;
+    if (count === 0) return out;
+    this.#uniformsF32(out, pairs * 2);
+    normalPairs32(out, pairs);
+    if (count & 1) out[count - 1] = this.nextNormal2F32()[0];
     return out;
   }
 
-  #pairF64(): [number, number] {
-    const a = this.nextF64(), b = this.nextF64();
-    const r = Math.sqrt(-2 * Math.log(1 - a)), [c, s] = cosSin2Pi(b);
-    return [r * c, r * s];
+  /** Standard exponentials -ln(1 - u) of one uniform each, with the same polynomial logarithm,
+   * so they equal tandem-c bit for bit. A fill consumes one draw per element. */
+  nextExponentialF64(): number {
+    pair[0] = this.nextF64();
+    exponential64(pair, 1);
+    return pair[0];
   }
-  #pairF32(): [number, number] {
-    const a = this.nextF32(), b = this.nextF32();
-    const r = Math.fround(Math.sqrt(Math.fround(-2 * Math.fround(Math.log(1 - a)))));
-    const [c, s] = cosSin2Pi(b);
-    return [Math.fround(r * Math.fround(c)), Math.fround(r * Math.fround(s))];
+  nextExponentialF32(): number {
+    pairF[0] = this.nextF32();
+    exponential32(pairF, 1);
+    return pairF[0];
+  }
+  fillExponentialF64(n: number | Float64Array): Float64Array {
+    const out = target(Float64Array, n);
+    if (out.length === 0) return out;
+    this.#uniformsF64(out, out.length);
+    exponential64(out, out.length);
+    return out;
+  }
+  fillExponentialF32(n: number | Float32Array): Float32Array {
+    const out = target(Float32Array, n);
+    if (out.length === 0) return out;
+    this.#uniformsF32(out, out.length);
+    exponential32(out, out.length);
+    return out;
+  }
+
+  /** The first m elements of `out` as the uniforms of the plain fill. */
+  #uniformsF64(out: Float64Array, m: number): void {
+    const u = wordsOf(out), p = this.#span(this.position, BigInt(m), 64);
+    streamWords(this.#key, this.#K, p >> 5n, u, 0, 2 * m);
+    mapF64(out, u, m);
+    this.#setPosition(p + 64n * BigInt(m));
+  }
+  #uniformsF32(out: Float32Array, m: number): void {
+    const u = wordsOf(out), p = this.#span(this.position, BigInt(m), 32);
+    streamWords(this.#key, this.#K, p >> 5n, u, 0, m);
+    mapF32(out, u, m);
+    this.#setPosition(p + 32n * BigInt(m));
   }
 
   /** Element i of the fill that would start here. The position does not move. */
@@ -390,8 +607,8 @@ export class Tandem {
 
   /** Fork n children from the current block and advance this generator to the next one. */
   fork(n: number): Tandem[] {
-    const f = fork(this.#key, this.#position, n);
-    this.#position = f.position;
+    const f = fork(this.#key, this.position, n);
+    this.#setPosition(f.position);
     return f.children.map((key) => new Tandem(key, { K: this.#K }));
   }
 }

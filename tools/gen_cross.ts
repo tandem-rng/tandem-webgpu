@@ -12,8 +12,16 @@ const SOURCES: Record<string, string[]> = {
     "CROSS_NORMALF",
     "CROSS_NORMALF_END_POS",
   ],
-  "../tandem-cuda/tests/cross_fill_below.h": ["CROSS_FILL_KEY", "CROSS_BELOW32", "CROSS_BELOW64"],
+  "../tandem-c/tests/cross_exponential.h": ["CROSS_EXPONENTIAL", "CROSS_EXPONENTIALF"],
+  "../tandem-cuda/tests/cross_fill_below.h": [
+    "CROSS_FILL_KEY",
+    "CROSS_BELOW32",
+    "CROSS_BELOW64",
+    "CROSS_BELOW32_AT",
+    "CROSS_BELOW64_AT",
+  ],
   "../tandem-cuda/tests/cross_fill_normal.h": ["CROSS_NORMAL64", "CROSS_NORMAL32"],
+  "../tandem-cuda/tests/cross_fill_exponential.h": ["CROSS_EXP64", "CROSS_EXP32"],
 };
 
 function toJson(body: string): unknown {

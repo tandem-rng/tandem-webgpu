@@ -1,6 +1,7 @@
 {
   "name": "tandem-webgpu",
   "exports": "./src/mod.ts",
+  "nodeModulesDir": "none",
   "tasks": {
     "embed": "deno run --allow-read --allow-write tools/embed.ts",
     "test": "deno test --allow-read tests/",
