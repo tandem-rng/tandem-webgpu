@@ -10,13 +10,14 @@ produces the stream the specification defines, bit for bit.
 - `tandem.wgsl`: the building blocks `T`, `F`, `F_keyed`, `block`, `split_key`, `sub_key`,
   and the `fill` entry point. WGSL has no 64-bit integers, so the 32x32 to 64 product of the
   mix is built from 16-bit halves, which is exact, and chunk indices travel as word pairs.
-- `src/`: `seed`, `split`, `sub`, `fork`, the float mappings, and `fill`, which runs the
-  shader and reads back a typed array. No dependencies.
+- `src/`: the `Tandem` class for draws and fills on the CPU, the key functions `seed`, `split`,
+  `sub`, `fork`, the float mappings, and `fill`, which runs the shader and reads back a typed
+  array. No dependencies.
 
 ## Use
 
 ```ts
-import { fill, fillBuffer, fork, requestDevice, seed, split } from "tandem-webgpu";
+import { fill, fillBuffer, fork, requestDevice, seed, split, Tandem } from "tandem-webgpu";
 
 const device = await requestDevice();          // a device with the adapter's buffer limits
 const key = seed(42n);                          // 128-bit seed through the spec's whitening
@@ -25,12 +26,23 @@ const next = await fill(device, { key, position, count: 1000, dtype: "u32" });
 const worker = split(key, 7n);                  // by index, from the key alone
 const { children } = fork(key, position, 4);    // from the current block
 const { buffer } = await fillBuffer(device, { key, count: 1 << 24, dtype: "u32" }); // stays on the GPU
+
+const rng = Tandem.seed(42n);                   // small draws on the CPU, no device needed
+rng.nextF64(); rng.nextU8(); rng.nextBool();    // each aligns to its width, as the spec says
+const xs = rng.fillF32(1000);                   // also fillU32, fillU64, fillF64
+rng.atU32(5n);                                  // element 5 of the next fill, position unmoved
+const child = rng.split(7);                     // also sub(purpose) and fork(n), as Tandem objects
 ```
 
 `dtype` is one of `u8`, `u16`, `u32`, `u64`, `f32`, `f64`. The shader writes stream words, and
 `fill` applies the spec's float mappings on the host: `(raw >> 8) * 2^-24` for `f32` and
 `(raw >> 11) * 2^-53` for `f64`. `fillBuffer` returns a storage buffer of whole 16-byte stream
 blocks plus the byte offset of the first value; pass `buffer` to write into your own.
+
+`Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
+`chunkLength`. Its draws are the spec's scalar draws: `nextU8`, `nextU16`, `nextU32`, `nextU64`,
+`nextF32`, `nextF64` and `nextBool`. Each draw costs one `block` call per 16 bytes, so use
+`fill` on the GPU for bulk output.
 
 Deno runs the TypeScript directly. For browsers and Node, `npm run build` emits `dist/`.
 
@@ -41,7 +53,9 @@ deno task test
 ```
 
 `tests/core.test.ts` checks the CPU building blocks against every vector of the specification
-(`tests/vectors.json`, a copy of the spec repository's file). `tests/gpu.test.ts` checks the
+(`tests/vectors.json`, a copy of the spec repository's file). It also checks the `Tandem` class:
+its fills against every dump in `tests/data` at K = 32 and K = 8, its mixed-width draws, its
+fills from mid-stream positions, its derived generators, and the 2^64 position bound. `tests/gpu.test.ts` checks the
 GPU fill against the vectors and against reference stream dumps in `tests/data`
 for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
 and across workgroup boundaries. The GPU tests skip when no adapter exists. CI runs them with

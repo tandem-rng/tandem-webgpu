@@ -121,3 +121,165 @@ export const toFloat32 = (raw: number) => Math.fround((raw >>> 8) * 2 ** -24);
 
 /** The spec's Float64 mapping of a 64-bit value: (raw >> 11) * 2^-53. */
 export const toFloat64 = (raw: bigint) => Number(raw >> 11n) * 2 ** -53;
+
+/** Throw unless K is a power of two in [1, 65536]. */
+export function checkK(K: number): void {
+  if (!Number.isInteger(Math.log2(K)) || K < 1 || K > 65536) {
+    throw new RangeError("K must be a power of two in [1, 65536]");
+  }
+}
+
+const POSITION_LIMIT = 1n << 64n;
+
+/**
+ * A stream generator on the CPU: a key, a bit position and a chunk length. Scalar draws,
+ * fills and derived generators follow section 5 and 6 of the specification. Each draw
+ * costs one `block` call per 16 bytes, so use `fill` on the GPU for bulk output.
+ */
+export class Tandem {
+  #key: Key;
+  #position: bigint;
+  #K: number;
+  #cacheIndex = -1n;
+  #cache: Key = [0, 0, 0, 0];
+
+  constructor(key: Key, { position = 0n, K = DEFAULT_K }: { position?: bigint; K?: number } = {}) {
+    checkK(K);
+    if (position < 0n || position >= POSITION_LIMIT) throw new RangeError("position out of range");
+    this.#key = [key[0], key[1], key[2], key[3]];
+    this.#position = position;
+    this.#K = K;
+  }
+
+  static seed(z: bigint, K: number = DEFAULT_K): Tandem {
+    return new Tandem(seed(z), { K });
+  }
+
+  get key(): Key {
+    return this.#key;
+  }
+  get position(): bigint {
+    return this.#position;
+  }
+  get chunkLength(): number {
+    return this.#K;
+  }
+
+  /** The stream block with index n: row n >> 3, lane n & 7. */
+  #blockAt(n: bigint): Key {
+    if (n !== this.#cacheIndex) {
+      const row = n >> 3n, K = BigInt(this.#K);
+      this.#cache = block(this.#key, 8n * (row / K) + (n & 7n), Number(row % K));
+      this.#cacheIndex = n;
+    }
+    return this.#cache;
+  }
+
+  /** The w-bit value at aligned bit position p, as a bigint for w = 64 and a number below. */
+  #read(p: bigint, w: number): number | bigint {
+    const b = this.#blockAt(p >> 7n), o = Number(p & 127n), i = o >>> 5;
+    if (w === 64) return BigInt(b[i]) | (BigInt(b[i + 1]) << 32n);
+    return w === 32 ? b[i] : (b[i] >>> (o & 31)) & ((1 << w) - 1);
+  }
+
+  /** The aligned start of a run of n draws of width w, checked against the 2^64 bound. */
+  #span(from: bigint, n: bigint, w: number): bigint {
+    const p = align(from, w);
+    if (p + BigInt(w) * n >= POSITION_LIMIT) {
+      throw new RangeError("position past 2^64 bits");
+    }
+    return p;
+  }
+
+  #draw(w: number): number | bigint {
+    const p = this.#span(this.#position, 1n, w);
+    const x = this.#read(p, w);
+    this.#position = p + BigInt(w);
+    return x;
+  }
+
+  #each(n: number, w: number, set: (i: number, raw: number | bigint) => void): void {
+    const p = this.#span(this.#position, BigInt(n), w);
+    for (let i = 0; i < n; i++) set(i, this.#read(p + BigInt(w * i), w));
+    this.#position = p + BigInt(w) * BigInt(n);
+  }
+
+  #at(i: bigint | number, w: number): number | bigint {
+    const k = BigInt(i);
+    return this.#read(this.#span(this.#position, k + 1n, w) + BigInt(w) * k, w);
+  }
+
+  nextBool(): boolean {
+    return this.#draw(1) === 1;
+  }
+  nextU8(): number {
+    return this.#draw(8) as number;
+  }
+  nextU16(): number {
+    return this.#draw(16) as number;
+  }
+  nextU32(): number {
+    return this.#draw(32) as number;
+  }
+  nextU64(): bigint {
+    return this.#draw(64) as bigint;
+  }
+  nextF32(): number {
+    return toFloat32(this.nextU32());
+  }
+  nextF64(): number {
+    return toFloat64(this.nextU64());
+  }
+
+  fillU32(n: number): Uint32Array {
+    const out = new Uint32Array(n);
+    this.#each(n, 32, (i, x) => out[i] = x as number);
+    return out;
+  }
+  fillU64(n: number): BigUint64Array {
+    const out = new BigUint64Array(n);
+    this.#each(n, 64, (i, x) => out[i] = x as bigint);
+    return out;
+  }
+  fillF32(n: number): Float32Array {
+    const out = new Float32Array(n);
+    this.#each(n, 32, (i, x) => out[i] = toFloat32(x as number));
+    return out;
+  }
+  fillF64(n: number): Float64Array {
+    const out = new Float64Array(n);
+    this.#each(n, 64, (i, x) => out[i] = toFloat64(x as bigint));
+    return out;
+  }
+
+  /** Element i of the fill that would start here. The position does not move. */
+  atU32(i: bigint | number): number {
+    return this.#at(i, 32) as number;
+  }
+  atU64(i: bigint | number): bigint {
+    return this.#at(i, 64) as bigint;
+  }
+  atF32(i: bigint | number): number {
+    return toFloat32(this.atU32(i));
+  }
+  atF64(i: bigint | number): number {
+    return toFloat64(this.atU64(i));
+  }
+
+  /** Child `index` by key alone, at position 0 with this generator's K. */
+  split(index: bigint | number): Tandem {
+    return new Tandem(split(this.#key, BigInt(index)), { K: this.#K });
+  }
+
+  /** A child for a named purpose, by key alone. */
+  sub(purpose: bigint | number): Tandem {
+    return new Tandem(sub(this.#key, BigInt(purpose)), { K: this.#K });
+  }
+
+  /** Fork n children from the current block and advance this generator to the next one. */
+  fork(n: number): Tandem[] {
+    const f = fork(this.#key, this.#position, n);
+    this.#position = f.position;
+    return f.children.map((key) => new Tandem(key, { K: this.#K }));
+  }
+}

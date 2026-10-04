@@ -4,6 +4,7 @@
 export {
   align,
   block,
+  checkK,
   DEFAULT_K,
   F,
   fKeyed,
@@ -12,6 +13,7 @@ export {
   split,
   sub,
   T,
+  Tandem,
   toFloat32,
   toFloat64,
 } from "./core.ts";

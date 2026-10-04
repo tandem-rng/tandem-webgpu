@@ -1,6 +1,6 @@
 // The WebGPU fill: stream words in row order from an aligned bit position.
 
-import { align, DEFAULT_K, type Key, toFloat32, toFloat64 } from "./core.ts";
+import { align, checkK, DEFAULT_K, type Key, toFloat32, toFloat64 } from "./core.ts";
 import { SHADER } from "./shader.ts";
 
 export type DType = "u8" | "u16" | "u32" | "u64" | "f32" | "f64";
@@ -58,9 +58,7 @@ export async function fillBuffer(
   device: GPUDevice,
   { key, position = 0n, count, dtype, K = DEFAULT_K, buffer }: FillOptions,
 ): Promise<{ buffer: GPUBuffer; byteOffset: number; byteLength: number; position: bigint }> {
-  if (!Number.isInteger(Math.log2(K)) || K < 1 || K > 65536) {
-    throw new RangeError("K must be a power of two in [1, 65536]");
-  }
+  checkK(K);
   const w = WIDTH[dtype];
   const p0 = align(position, w);
   const p1 = p0 + BigInt(w) * BigInt(count);
