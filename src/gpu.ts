@@ -31,9 +31,8 @@ export type FillOptions = {
   range?: bigint | number;
   /** For `f32`: standard normals by Box-Muller, Appendix A. Elements 2j and 2j + 1 come from
    * uniform draws 2j and 2j + 1, so an odd count consumes one draw more than it writes, and
-   * `buffer` must hold the blocks of that many draws. Computed in single precision with the
-   * device's `log`, `sqrt`, `cos` and `sin` on a quarter-turn-reduced angle, so values agree
-   * with other ports to 16 ulps plus 1e-6. An empty fill leaves the position unchanged. */
+   * `buffer` must hold the blocks of that many draws. Computed in single precision with
+   * the arithmetic of tandem-c, so values agree with other ports to 16 ulps plus 1e-6. An empty fill leaves the position unchanged. */
   normal?: boolean;
 };
 

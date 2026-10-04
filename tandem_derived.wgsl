@@ -172,19 +172,38 @@ fn fill_below64(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) 
 const TWO_PI_HI: f32 = 6.2831855;
 const TWO_PI_LO: f32 = -1.7484555e-7;
 
-// Box-Muller of the uniforms (a, b) in single precision. The angle 2 pi b is cut by the
-// nearest quarter turn first. b - q/4 is exact, so cos and sin only see [-pi/4, pi/4], where
-// the builtins are accurate on every implementation.
+// Box-Muller of the uniforms (a, b) in single precision, the arithmetic of tandem-c. WGSL
+// leaves the accuracy of log, cos and sin to the implementation, and a software rasteriser
+// misses the tolerance, so the two functions are short series that need only fma and sqrt.
+//
+// ln(1 - a): 1 - a is exact and in (0, 1]. Split it as m 2^e with m in [sqrt(1/2), sqrt(2))
+// from its exponent bits, then ln m = 2 s (1 + z/3 + z^2/5 + ...) with s = (m - 1) / (m + 1)
+// and z = s^2 <= 0.03.
+//
+// cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle lies in
+// [-pi/4, pi/4] and Taylor series give cos and sin there. The quarter turn is a swap and a
+// sign change.
 fn normal_pair(a: f32, b: f32) -> vec2<f32> {
-    let r = sqrt(-2.0 * log(1.0 - a));
+    let bits = bitcast<u32>(1.0 - a) + 0x004afb0du;
+    let nk = f32(127i - i32(bits >> 23u));
+    let m = bitcast<f32>((bits & 0x007fffffu) + 0x3f3504f3u);
+    let s = (m - 1.0) / (m + 1.0);
+    let z = s * s;
+    let p = fma(z, fma(z, fma(z, 0.14275366, 0.20000061), 0.33333334), 1.0);
+    let r = sqrt(fma(nk, 1.38629150390625, (s * -4.0) * p) + nk * 2.857213530660374e-06);
+
     let q = u32(b * 4.0 + 0.5);
-    let f = b - f32(q) * 0.25;
+    let f = fma(-f32(q), 0.25, b);
+    // 2 pi as a float pair, so the angle is good to the last bit of the float.
     let th = fma(f, TWO_PI_LO, f * TWO_PI_HI);
-    let c = cos(th);
-    let s = sin(th);
-    let m = q & 3u;
-    let x = select(select(select(c, s, m == 3u), -c, m == 2u), -s, m == 1u);
-    let y = select(select(select(s, -c, m == 3u), -s, m == 2u), c, m == 1u);
+    let w = th * th;
+    let hs = fma(w, fma(w, fma(w, 2.72499e-06, -0.00019840087), 0.008333332), -0.16666667);
+    let hc = fma(w, fma(w, fma(w, 2.4463761e-05, -0.0013887589), 0.04166665), -0.5);
+    let sn = th * fma(w, hs, 1.0);
+    let cs = fma(w, hc, 1.0);
+    let k = q & 3u;
+    let x = select(select(select(cs, sn, k == 3u), -cs, k == 2u), -sn, k == 1u);
+    let y = select(select(select(sn, -cs, k == 3u), -sn, k == 2u), cs, k == 1u);
     return r * vec2<f32>(x, y);
 }
 

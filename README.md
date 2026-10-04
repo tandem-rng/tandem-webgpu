@@ -77,12 +77,13 @@ an odd count consumes one draw more than it writes. Both are also options of `fi
 `fillMany` and `fill`: `range` for the integers and `normal: true` with `dtype: "f32"`. A
 caller `buffer` for a normal fill must hold the blocks of the draws it consumes.
 
-The normals use the device's `log`, `sqrt`, `cos` and `sin` in single precision, with the
-angle cut by the nearest quarter turn first so that the builtins only see arguments in
-[-pi/4, pi/4]. Implementations may differ in the last places, so values agree with the other
-ports to 16 ulps plus 1e-6, the tolerance of Appendix A. The GPU runs the uniform fill and
-then a pair pass over the same buffer, so the pairs may straddle stream blocks at any start.
-There is no GPU `f64` normal, for lack of an f64 type.
+The GPU normals are computed in single precision with the arithmetic of tandem-c: `log` is a
+short series on the exponent-split argument and `cos` and `sin` are Taylor series on an angle cut
+by the nearest quarter turn, so only `fma` and `sqrt` come from the device. WGSL leaves the
+accuracy of its own `log`, `cos` and `sin` open and a software rasteriser misses the tolerance
+with them. Values agree with the other ports to 16 ulps plus 1e-6, the tolerance of Appendix A.
+The GPU runs the uniform fill and then a pair pass over the same buffer, so the pairs may
+straddle stream blocks at any start. There is no GPU `f64` normal, for lack of an f64 type.
 
 `Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
 `chunkLength`. Its draws are the spec's scalar draws: `nextU8`, `nextU16`, `nextU32`, `nextU64`,
@@ -145,7 +146,7 @@ warm-up:
 | Deno, `fill_below` u32, range 1000, 2^26 words, 32 fills per submit | 131 |
 | Deno, `fill_below` u64, range 1000, 2^26 words (2^25 values), 32 fills per submit | 128 |
 | Deno, `fill_below` u32, range 2^31 + 1 (half of the draws reject), 32 fills per submit | 5 |
-| Deno, `fill_normal` f32, 2^26 values, 32 fills per submit | 57 |
+| Deno, `fill_normal` f32, 2^26 values, 32 fills per submit | 62 |
 | store ceiling: one constant block per invocation, same buffer, 32 per submit | 700 to 720 |
 
 Variants measured on this GPU and rejected, all within noise of the committed shader or
@@ -157,7 +158,7 @@ measured four times slower. `deno task bench` prints the Deno rows and the ceili
 A bounded fill costs the same as a plain fill until draws reject. A rejection derives a
 fallback key with three seeding functions and then draws on that stream, so the half-rejecting
 range above is the worst case and ranges far from 2^31 reject rarely. The normal fill is two
-passes, the uniform fill and an in-place pair pass, and runs at about 0.4 of the plain fill.
+passes, the uniform fill and an in-place pair pass, and runs at about 0.45 of the plain fill.
 
 `demo/index.html` runs the fill in a browser: `python3 -m http.server` in the repo root and
 open `/demo/`.
