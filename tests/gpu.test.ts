@@ -1,6 +1,18 @@
 // The GPU fill against the Julia dumps and the spec vectors. Skipped without an adapter.
 import { assertEquals } from "jsr:@std/assert@1";
-import { fill, fillBuffer, fillMany, requestDevice, seed, Tandem, toFloat32 } from "../src/mod.ts";
+import {
+  align,
+  fill,
+  fillBelow,
+  fillBuffer,
+  fillMany,
+  fillNormal,
+  requestDevice,
+  seed,
+  Tandem,
+  toFloat32,
+} from "../src/mod.ts";
+import cross from "./cross.json" with { type: "json" };
 import vectors from "./vectors.json" with { type: "json" };
 
 const adapter = await navigator.gpu?.requestAdapter();
@@ -184,3 +196,161 @@ Deno.test({ name: "fill leaves a caller buffer alive for reuse", ...gpu }, async
   assertEquals(b.values, whole.subarray(100));
   buffer.destroy();
 });
+
+type DeviceBelow = [string, number, string[]];
+type CFill = [string, string, string[], string];
+type DeviceNormal = [string, number, number[]];
+const FIXTURE_KEY = cross.CROSS_FILL_KEY as [number, number, number, number];
+const near32 = (got: number, want: number) =>
+  Math.abs(got - Math.fround(want)) <= 16 * 2 ** -23 * Math.abs(want) + 1e-6;
+
+Deno.test({ name: "bounded fills equal the tandem-cuda fixtures", ...gpu }, async () => {
+  for (const [range, , want] of cross.CROSS_BELOW32 as unknown as DeviceBelow[]) {
+    const { values } = await fillBelow(device!, {
+      key: FIXTURE_KEY,
+      count: 64,
+      dtype: "u32",
+      range: Number(range),
+    });
+    assertEquals(values, Uint32Array.from(want, Number), `u32 range ${range}`);
+  }
+  for (const [range, , want] of cross.CROSS_BELOW64 as unknown as DeviceBelow[]) {
+    const { values } = await fillBelow(device!, {
+      key: FIXTURE_KEY,
+      count: 64,
+      dtype: "u64",
+      range: BigInt(range),
+    });
+    assertEquals(values, BigUint64Array.from(want, BigInt), `u64 range ${range}`);
+  }
+});
+
+Deno.test(
+  { name: "bounded fills equal the CPU class with rejections, K and positions", ...gpu },
+  async () => {
+    const key = seed(21n);
+    for (const K of [32, 8]) {
+      for (const position of [0n, 37n, 32n * 4099n + 5n]) {
+        for (const range of [0, 1, 3, 1000, 2147483649, 4294967295]) {
+          const cpu = new Tandem(key, { position, K }).fillU32Below(5000, range);
+          const gpuValues = await fillBelow(device!, {
+            key,
+            position,
+            K,
+            count: 5000,
+            dtype: "u32",
+            range,
+          });
+          assertEquals(gpuValues.values, cpu, `u32 K=${K} from ${position} range ${range}`);
+        }
+        for (const range of [0n, 1n, 3n, 10n ** 12n, 9223372036854775809n, 18446744073709551615n]) {
+          const cpu = new Tandem(key, { position, K }).fillU64Below(3001, range);
+          const gpuValues = await fillBelow(device!, {
+            key,
+            position,
+            K,
+            count: 3001,
+            dtype: "u64",
+            range,
+          });
+          assertEquals(gpuValues.values, cpu, `u64 K=${K} from ${position} range ${range}`);
+        }
+      }
+    }
+  },
+);
+
+Deno.test(
+  { name: "a GPU bounded fill cut at arbitrary boundaries equals the whole fill", ...gpu },
+  async () => {
+    const key = seed(11n), position = 37n, cuts = [0, 101, 233, 3000];
+    const u32 = 2147483649, u64 = 9223372036854775809n;
+    const whole32 =
+      (await fillBelow(device!, { key, position, count: 3000, dtype: "u32", range: u32 })).values;
+    const whole64 =
+      (await fillBelow(device!, { key, position, count: 3000, dtype: "u64", range: u64 })).values;
+    for (let c = 0; c + 1 < cuts.length; c++) {
+      const [a, b] = [cuts[c], cuts[c + 1]];
+      const at = (w: bigint) => align(position, Number(w)) + w * BigInt(a);
+      const part32 = await fillBelow(device!, {
+        key,
+        position: at(32n),
+        count: b - a,
+        dtype: "u32",
+        range: u32,
+      });
+      assertEquals(part32.values, whole32.subarray(a, b), `u32 [${a},${b})`);
+      assertEquals(part32.position, align(position, 32) + 32n * BigInt(b));
+      const part64 = await fillBelow(device!, {
+        key,
+        position: at(64n),
+        count: b - a,
+        dtype: "u64",
+        range: u64,
+      });
+      assertEquals(part64.values, whole64.subarray(a, b), `u64 [${a},${b})`);
+    }
+  },
+);
+
+Deno.test(
+  { name: "derived fills batch in fillMany and an empty one leaves the position", ...gpu },
+  async () => {
+    const key = seed(2n);
+    const [a, b, empty, none] = await fillMany(device!, [
+      { key, count: 100, dtype: "u32", range: 1000 },
+      { key, position: 9n, count: 33, dtype: "f32", normal: true },
+      { key, position: 9n, count: 0, dtype: "u32", range: 7 },
+      { key, position: 9n, count: 0, dtype: "f32", normal: true },
+    ]);
+    assertEquals(empty.position, 9n);
+    assertEquals(none.position, 9n);
+    assertEquals(b.position, 32n + 32n * 34n);
+    const cpu = new Tandem(key).fillU32Below(100, 1000);
+    assertEquals(new Uint32Array(await readBytes(a.buffer, a.byteOffset, a.byteLength)), cpu);
+  },
+);
+
+Deno.test(
+  { name: "normals match the tandem-cuda fixtures and tandem-c pairs", ...gpu },
+  async () => {
+    for (const [pos, n, want] of cross.CROSS_NORMAL32 as unknown as DeviceNormal[]) {
+      const { values, position } = await fillNormal(device!, {
+        key: FIXTURE_KEY,
+        position: BigInt(pos),
+        count: n,
+      });
+      assertEquals(values.every((z, i) => near32(z, want[i])), true, `from ${pos}`);
+      assertEquals(position, align(BigInt(pos), 32) + 32n * BigInt(n + (n % 2)));
+    }
+    // tandem-c: seed 42 after a one-bit draw, so the pairs start at an odd stream word.
+    const want = cross.CROSS_NORMALF as number[];
+    const { values, position } = await fillNormal(device!, {
+      key: seed(42n),
+      position: 1n,
+      count: want.length,
+    });
+    assertEquals(values.every((z, i) => near32(z, want[i])), true);
+    assertEquals(position, BigInt(cross.CROSS_NORMALF_END_POS));
+  },
+);
+
+Deno.test(
+  { name: "normals equal the CPU class across the two-dimensional pair dispatch", ...gpu },
+  async () => {
+    const key = seed(77n), position = 32n * 13n, n = (1 << 25) + 3;
+    const { values } = await fillNormal(device!, { key, position, count: n });
+    // Pair 65535 * 256 is the first of the second dispatch row. Check around it and the end.
+    for (const start of [2 * 65535 * 256 - 4, 2 * ((n - 1) >> 1) - 2]) {
+      const cpu = new Tandem(key, { position: position + 32n * BigInt(start) }).fillNormalF32(
+        Math.min(8, n - start),
+      );
+      assertEquals(
+        cpu.every((z, i) => near32(values[start + i], z)),
+        true,
+        `from element ${start}`,
+      );
+    }
+    assertEquals(values.length, n);
+  },
+);

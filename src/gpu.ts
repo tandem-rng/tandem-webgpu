@@ -24,13 +24,26 @@ export type FillOptions = {
   /** For `f32` only: store the spec's floats `(raw >> 8) * 2^-24` instead of raw words, so the
    * buffer holds Float32 values ready for a later GPU stage. Default false. */
   floats?: boolean;
+  /** For `u32` and `u64`: bounded integers in [0, range) by Lemire's method, Appendix A of the
+   * specification. Element i takes draw i and a rejected draw retries on a fallback generator
+   * keyed by the draw's index in the stream, so a fill cut at any element boundary equals the
+   * whole fill. A range of 0 gives 0. An empty fill leaves the position unchanged. */
+  range?: bigint | number;
+  /** For `f32`: standard normals by Box-Muller, Appendix A. Elements 2j and 2j + 1 come from
+   * uniform draws 2j and 2j + 1, so an odd count consumes one draw more than it writes, and
+   * `buffer` must hold the blocks of that many draws. Computed in single precision with the
+   * device's `log`, `sqrt`, `cos` and `sin` on a quarter-turn-reduced angle, so values agree
+   * with other ports to 16 ulps plus 1e-6. An empty fill leaves the position unchanged. */
+  normal?: boolean;
 };
 
 export type Fill<T> = { values: T; position: bigint };
 
 const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>>>();
 
-function pipelineFor(device: GPUDevice, entryPoint: "fill" | "fill_f32") {
+type Entry = "fill" | "fill_f32" | "fill_below32" | "fill_below64" | "normal_pairs";
+
+function pipelineFor(device: GPUDevice, entryPoint: Entry) {
   let byEntry = pipelines.get(device);
   if (!byEntry) pipelines.set(device, byEntry = new Map());
   let p = byEntry.get(entryPoint);
@@ -56,26 +69,44 @@ export async function requestDevice(adapter?: GPUAdapter | null): Promise<GPUDev
 
 type Placed = { buffer: GPUBuffer; byteOffset: number; byteLength: number; position: bigint };
 type Job = {
-  entry: "fill" | "fill_f32";
-  params: Uint32Array<ArrayBuffer>;
-  workgroups: number;
+  entry: Entry;
+  /** Binding 0, the fill parameters. The pair pass has none. */
+  params?: Uint32Array<ArrayBuffer>;
+  /** Binding 2, the range or the pair layout. */
+  extra?: Uint32Array<ArrayBuffer>;
+  workgroups: [number, number];
   buffer: GPUBuffer;
 };
 
-/** Validate one fill, allocate its buffer and compute its dispatch. Touches no queue. */
+const MAX_WORKGROUPS = 65535;
+const PAIR_THREADS = 256;
+
+/** Validate one fill, allocate its buffer and compute its dispatches. Touches no queue. */
 function plan(
   device: GPUDevice,
-  { key, position = 0n, count, dtype, K = DEFAULT_K, buffer, floats = false }: FillOptions,
-): { placed: Placed; job?: Job } {
+  { key, position = 0n, count, dtype, K = DEFAULT_K, buffer, floats = false, range, normal }:
+    FillOptions,
+): { placed: Placed; jobs: Job[] } {
   checkK(K);
-  if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
   const w = WIDTH[dtype];
+  if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
+  if (normal && (dtype !== "f32" || range !== undefined)) {
+    throw new RangeError("normal applies to dtype f32 only, without range");
+  }
+  if (range !== undefined && dtype !== "u32" && dtype !== "u64") {
+    throw new RangeError("range applies to dtype u32 and u64 only");
+  }
+  const bound = range === undefined ? 0n : BigInt(range);
+  if (bound < 0n || bound >> BigInt(w)) throw new RangeError(`range must fit in ${w} bits`);
+
+  // A normal pair needs two draws, so an odd count still consumes the second one.
+  const draws = count + (normal ? count % 2 : 0);
   const p0 = align(position, w);
-  const p1 = p0 + BigInt(w) * BigInt(count);
+  const p1 = p0 + BigInt(w) * BigInt(draws);
   const blockStart = p0 >> 7n;
   const blockEnd = (p1 + 127n) >> 7n;
   const nBlocks = Number(blockEnd - blockStart);
-  const byteLength = Number(p1 - p0) / 8;
+  const byteLength = BigInt(w) * BigInt(count) / 8n;
   const byteOffset = Number(p0 - (blockStart << 7n)) / 8;
 
   if (buffer && buffer.size < nBlocks * 16) {
@@ -85,12 +116,19 @@ function plan(
   const g0 = (blockStart >> 3n) / rowsPerGroup;
   const g1 = ((blockEnd - 1n) >> 3n) / rowsPerGroup;
   const workgroups = nBlocks === 0 ? 0 : Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
-  if (workgroups > 65535) {
+  if (workgroups > MAX_WORKGROUPS) {
     throw new RangeError("fill too large for one dispatch: split the fill by position");
   }
   buffer ??= device.createBuffer({ size: Math.max(16, nBlocks * 16), usage: STORAGE | COPY_SRC });
-  const placed = { buffer, byteOffset, byteLength, position: p1 };
-  if (nBlocks === 0) return { placed };
+  // A derived fill with no elements draws nothing, so it does not even align the position.
+  const derived = normal || range !== undefined;
+  const placed = {
+    buffer,
+    byteOffset,
+    byteLength: Number(byteLength),
+    position: derived && count === 0 ? position : p1,
+  };
+  if (nBlocks === 0 || (derived && count === 0)) return { placed, jobs: [] };
 
   const params = new Uint32Array(12);
   params.set(key, 0);
@@ -100,36 +138,58 @@ function plan(
   params[7] = Number(blockStart >> 32n);
   params[8] = nBlocks;
   params[9] = K;
-  return { placed, job: { entry: floats ? "fill_f32" : "fill", params, workgroups, buffer } };
+  const entry: Entry = range !== undefined
+    ? (w === 32 ? "fill_below32" : "fill_below64")
+    : floats || normal
+    ? "fill_f32"
+    : "fill";
+  const fillJob: Job = { entry, params, workgroups: [workgroups, 1], buffer };
+  if (range !== undefined) {
+    fillJob.extra = new Uint32Array([Number(bound & 0xffffffffn), Number(bound >> 32n), 0, 0]);
+  }
+  if (!normal) return { placed, jobs: [fillJob] };
+
+  const pairs = Math.ceil(count / 2);
+  const groups = Math.ceil(pairs / PAIR_THREADS);
+  const x = Math.min(groups, MAX_WORKGROUPS), y = Math.ceil(groups / x);
+  if (y > MAX_WORKGROUPS) throw new RangeError("fill too large for one dispatch");
+  const pairJob: Job = {
+    entry: "normal_pairs",
+    extra: new Uint32Array([byteOffset / 4, count, pairs, 0]),
+    workgroups: [x, y],
+    buffer,
+  };
+  return { placed, jobs: [fillJob, pairJob] };
 }
 
 /** Encode every job into one compute pass and submit once. */
 async function dispatch(device: GPUDevice, jobs: Job[]): Promise<void> {
   if (jobs.length === 0) return;
-  const pipelines = new Map<Job["entry"], GPUComputePipeline>();
+  const pipelines = new Map<Entry, GPUComputePipeline>();
   for (const { entry } of jobs) {
     if (!pipelines.has(entry)) pipelines.set(entry, await pipelineFor(device, entry));
   }
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
-  const uniforms = jobs.map(({ entry, params, workgroups, buffer }) => {
-    const uniform = device.createBuffer({ size: params.byteLength, usage: UNIFORM | COPY_DST });
-    device.queue.writeBuffer(uniform, 0, params);
+  const uniforms: GPUBuffer[] = [];
+  const uniform = (data: Uint32Array<ArrayBuffer>) => {
+    const u = device.createBuffer({ size: data.byteLength, usage: UNIFORM | COPY_DST });
+    device.queue.writeBuffer(u, 0, data);
+    uniforms.push(u);
+    return u;
+  };
+  for (const { entry, params, extra, workgroups, buffer } of jobs) {
     const pipeline = pipelines.get(entry)!;
+    const entries: GPUBindGroupEntry[] = [{ binding: 1, resource: { buffer } }];
+    if (params) entries.push({ binding: 0, resource: { buffer: uniform(params) } });
+    if (extra) entries.push({ binding: 2, resource: { buffer: uniform(extra) } });
     pass.setPipeline(pipeline);
     pass.setBindGroup(
       0,
-      device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: uniform } },
-          { binding: 1, resource: { buffer } },
-        ],
-      }),
+      device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }),
     );
-    pass.dispatchWorkgroups(workgroups);
-    return uniform;
-  });
+    pass.dispatchWorkgroups(...workgroups);
+  }
   pass.end();
   device.queue.submit([encoder.finish()]);
   for (const u of uniforms) u.destroy();
@@ -145,7 +205,7 @@ export async function fillMany(
   items: readonly FillOptions[],
 ): Promise<Placed[]> {
   const planned = items.map((item) => plan(device, item));
-  await dispatch(device, planned.flatMap(({ job }) => job ?? []));
+  await dispatch(device, planned.flatMap(({ jobs }) => jobs));
   return planned.map(({ placed }) => placed);
 }
 
@@ -207,6 +267,21 @@ export async function fill<D extends HostDType>(
   staging.destroy();
   if (!options.buffer) buffer.destroy();
   return { values: convert(bytes, options.dtype) as Values<D>, position };
+}
+
+type Plain = Omit<FillOptions, "dtype" | "floats" | "range" | "normal">;
+
+/** Bounded integers in [0, range) on the GPU, read back. See `FillOptions.range`. */
+export function fillBelow<D extends "u32" | "u64">(
+  device: GPUDevice,
+  options: Plain & { dtype: D; range: bigint | number },
+): Promise<Fill<Values<D>>> {
+  return fill(device, options);
+}
+
+/** Standard normals as Float32 on the GPU, read back. See `FillOptions.normal`. */
+export function fillNormal(device: GPUDevice, options: Plain): Promise<Fill<Float32Array>> {
+  return fill(device, { ...options, dtype: "f32", normal: true });
 }
 
 /** Bits are unaligned to bytes, so read whole words that cover them and cut the bits out. */

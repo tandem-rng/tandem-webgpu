@@ -1,6 +1,7 @@
 // The CPU building blocks against the spec vectors.
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 import {
+  align,
   block,
   F,
   fKeyed,
@@ -159,4 +160,143 @@ Deno.test("Tandem enforces the 2^64 position bound", () => {
   const g = new Tandem(KEY, { position: (1n << 64n) - 32n });
   assertThrows(() => g.nextU32(), RangeError);
   assertEquals(g.fillU32(0).length, 0);
+});
+
+// Fixtures of tandem-c and tandem-cuda (tools/gen_cross.ts). Structs are positional arrays and
+// 64-bit integers are decimal strings.
+import cross from "./cross.json" with { type: "json" };
+
+type Below = [string, string[], string]; // range, 64 values, end position
+type DeviceBelow = [string, number, string[]]; // range, rejected count, 64 values
+type CFill = [string, string, string[], string]; // start position, range, 64 values, end position
+type DeviceNormal = [string, number, number[]]; // start position, n, 64 values
+const FIXTURE_KEY = cross.CROSS_FILL_KEY as [number, number, number, number];
+
+/** 16 ulps plus 1e-6 for Float32 and 1e-12 relative for Float64, the tolerances of Appendix A. */
+const near32 = (got: number, want: number) =>
+  Math.abs(got - Math.fround(want)) <= 16 * 2 ** -23 * Math.abs(want) + 1e-6;
+const near64 = (got: number, want: number) => Math.abs(got - want) <= 1e-12 * Math.abs(want);
+
+Deno.test("scalar bounded draws match tandem-c, positions included", () => {
+  for (const [range, want, end] of cross.CROSS_U32 as unknown as Below[]) {
+    const g = Tandem.seed(42n);
+    g.nextBool();
+    assertEquals(want.map(() => g.nextU32Below(Number(range))), want.map(Number));
+    assertEquals(g.position, BigInt(end), `u32 range ${range}`);
+  }
+  for (const [range, want, end] of cross.CROSS_U64 as unknown as Below[]) {
+    const g = Tandem.seed(42n);
+    g.nextBool();
+    assertEquals(want.map(() => g.nextU64Below(BigInt(range))), want.map(BigInt));
+    assertEquals(g.position, BigInt(end), `u64 range ${range}`);
+  }
+});
+
+Deno.test("bounded fills from position 0 match tandem-cuda, rejections included", () => {
+  let rejected = 0;
+  for (const [range, rej, want] of cross.CROSS_BELOW32 as unknown as DeviceBelow[]) {
+    assertEquals(
+      new Tandem(FIXTURE_KEY).fillU32Below(64, Number(range)),
+      Uint32Array.from(want, Number),
+    );
+    rejected += rej;
+  }
+  for (const [range, rej, want] of cross.CROSS_BELOW64 as unknown as DeviceBelow[]) {
+    assertEquals(
+      new Tandem(FIXTURE_KEY).fillU64Below(64, BigInt(range)),
+      BigUint64Array.from(want, BigInt),
+    );
+    rejected += rej;
+  }
+  assertEquals(rejected > 0, true);
+});
+
+Deno.test("bounded fills from positions 1 and 12345 match tandem-c", () => {
+  for (const [start, range, want, end] of cross.CROSS_FILL_U32 as unknown as CFill[]) {
+    const g = new Tandem(seed(42n), { position: BigInt(start) });
+    assertEquals(g.fillU32Below(64, Number(range)), Uint32Array.from(want, Number));
+    assertEquals(g.position, BigInt(end), `u32 from ${start} range ${range}`);
+  }
+  for (const [start, range, want, end] of cross.CROSS_FILL_U64 as unknown as CFill[]) {
+    const g = new Tandem(seed(42n), { position: BigInt(start) });
+    assertEquals(g.fillU64Below(64, BigInt(range)), BigUint64Array.from(want, BigInt));
+    assertEquals(g.position, BigInt(end), `u64 from ${start} range ${range}`);
+  }
+});
+
+Deno.test("bounded range 0 gives 0 and consumes a draw, an empty fill moves nothing", () => {
+  const g = Tandem.seed(5n);
+  assertEquals(g.fillU32Below(3, 0), new Uint32Array(3));
+  assertEquals(g.position, 96n);
+  assertEquals(g.nextU64Below(0n), 0n);
+  assertEquals(g.position, 192n);
+  const h = new Tandem(KEY, { position: 5n });
+  h.fillU32Below(0, 7);
+  h.fillU64Below(0, 7n);
+  assertEquals(h.position, 5n);
+});
+
+/** Draws of the plain fill that Lemire rejects, so a test knows the fallback ran. */
+function rejections(raw: ArrayLike<number | bigint>, range: bigint, bits: bigint): number {
+  const t = ((1n << bits) - range) % range;
+  return Array.from(raw).filter((x) => ((BigInt(x) * range) & ((1n << bits) - 1n)) < t).length;
+}
+
+Deno.test("a bounded fill cut at any boundary equals the whole fill", () => {
+  const key = seed(11n), start = 37n, cuts = [0, 101, 233, 300];
+  for (const K of [32, 8]) {
+    const u32 = 2147483649, p32 = align(start, 32);
+    const whole32 = new Tandem(key, { position: start, K }).fillU32Below(300, u32);
+    assertEquals(
+      rejections(new Tandem(key, { position: start, K }).fillU32(300), BigInt(u32), 32n) > 0,
+      true,
+    );
+    const u64 = 9223372036854775809n, p64 = align(start, 64);
+    const whole64 = new Tandem(key, { position: start, K }).fillU64Below(300, u64);
+    assertEquals(
+      rejections(new Tandem(key, { position: start, K }).fillU64(300), u64, 64n) > 0,
+      true,
+    );
+    for (let c = 0; c + 1 < cuts.length; c++) {
+      const [a, b] = [cuts[c], cuts[c + 1]];
+      const p32a = new Tandem(key, { position: p32 + 32n * BigInt(a), K });
+      assertEquals(p32a.fillU32Below(b - a, u32), whole32.subarray(a, b), `u32 K=${K} [${a},${b})`);
+      const p64a = new Tandem(key, { position: p64 + 64n * BigInt(a), K });
+      assertEquals(p64a.fillU64Below(b - a, u64), whole64.subarray(a, b), `u64 K=${K} [${a},${b})`);
+    }
+  }
+});
+
+Deno.test("normals match tandem-c pairs from an unaligned start", () => {
+  const f64 = new Tandem(seed(42n));
+  f64.nextBool();
+  const want64 = cross.CROSS_NORMAL as number[], got64 = f64.fillNormalF64(want64.length);
+  assertEquals(want64.every((w, i) => near64(got64[i], w)), true);
+  assertEquals(f64.position, BigInt(cross.CROSS_NORMAL_END_POS));
+  const f32 = new Tandem(seed(42n));
+  f32.nextBool();
+  const want32 = cross.CROSS_NORMALF as number[], got32 = f32.fillNormalF32(want32.length);
+  assertEquals(want32.every((w, i) => near32(got32[i], w)), true);
+  assertEquals(f32.position, BigInt(cross.CROSS_NORMALF_END_POS));
+});
+
+Deno.test("normals match tandem-cuda fills at several positions, odd counts included", () => {
+  for (const [pos, n, want] of cross.CROSS_NORMAL64 as unknown as DeviceNormal[]) {
+    const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillNormalF64(n);
+    assertEquals(got.every((z, i) => near64(z, want[i])), true, `f64 from ${pos}`);
+  }
+  for (const [pos, n, want] of cross.CROSS_NORMAL32 as unknown as DeviceNormal[]) {
+    const g = new Tandem(FIXTURE_KEY, { position: BigInt(pos) });
+    const got = g.fillNormalF32(n);
+    assertEquals(got.every((z, i) => near32(z, want[i])), true, `f32 from ${pos}`);
+    assertEquals(g.position, align(BigInt(pos), 32) + 32n * BigInt(n + (n % 2)));
+  }
+});
+
+Deno.test("a scalar normal is the cosine half of the pair and consumes two draws", () => {
+  const g = Tandem.seed(8n), h = Tandem.seed(8n);
+  assertEquals(g.nextNormalF64(), h.fillNormalF64(1)[0]);
+  assertEquals(g.position, 128n);
+  assertEquals(g.nextNormalF32(), h.fillNormalF32(2)[0]);
+  assertEquals(new Tandem(KEY, { position: 5n }).fillNormalF32(0).length, 0);
 });

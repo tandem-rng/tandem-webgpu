@@ -48,7 +48,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install naga-cli --locked
       - run: naga tandem.wgsl
-      - run: cat tandem.wgsl tandem_f32.wgsl > both.wgsl && naga both.wgsl
+      - run: cat tandem.wgsl tandem_f32.wgsl tandem_derived.wgsl > all.wgsl && naga all.wgsl
   vectors:
     name: vectors are current
     runs-on: ubuntu-latest

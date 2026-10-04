@@ -130,6 +130,17 @@ export function checkK(K: number): void {
 }
 
 const POSITION_LIMIT = 1n << 64n;
+// Purposes reserved for the fallback generators of bounded fills (Appendix A).
+const PURPOSE_BELOW = { 32: 0x424c573332n, 64: 0x424c573634n } as const;
+const TWO_PI = 2 * Math.PI;
+
+/** cos and sin of 2 pi b for b in [0, 1). The nearest quarter turn comes off exactly, so the
+ * double-precision angle in [-pi/4, pi/4] needs no range reduction. */
+function cosSin2Pi(b: number): [number, number] {
+  const q = Math.floor(b * 4 + 0.5);
+  const th = TWO_PI * (b - q / 4), c = Math.cos(th), s = Math.sin(th);
+  return [[c, -s, -c, s][q & 3], [s, c, -s, -c][q & 3]];
+}
 
 /**
  * A stream generator on the CPU: a key, a bit position and a chunk length. Scalar draws,
@@ -250,6 +261,107 @@ export class Tandem {
     const out = new Float64Array(n);
     this.#each(n, 64, (i, x) => out[i] = toFloat64(x as bigint));
     return out;
+  }
+
+  /** One draw in [0, range) by Lemire's method, rejecting on the draws that follow. A range of
+   * 0 gives 0 and consumes one draw. */
+  nextU32Below(range: number): number {
+    return Number(this.#drawBelow(BigInt(range), 32, () => BigInt(this.nextU32())));
+  }
+  nextU64Below(range: bigint): bigint {
+    return this.#drawBelow(range, 64, () => this.nextU64());
+  }
+
+  /** Lemire over the draws of `next`; the first draw `x` is already taken by the caller's
+   * `next`, and each rejection takes another. */
+  #drawBelow(range: bigint, w: 32 | 64, next: () => bigint, first = next()): bigint {
+    if (range === 0n) return 0n;
+    const W = BigInt(w), mask = (1n << W) - 1n;
+    let m = first * range;
+    if ((m & mask) < range) {
+      const t = ((1n << W) - range) % range;
+      while ((m & mask) < t) m = next() * range;
+    }
+    return m >> W;
+  }
+
+  /**
+   * A bounded fill of n values in [0, range), as in Appendix A. It consumes exactly n draws,
+   * and a rejected draw retries on the fallback generator of its global draw index, so a fill
+   * cut at any element boundary equals the whole fill. An empty fill moves nothing.
+   */
+  fillU32Below(n: number, range: number): Uint32Array {
+    const out = new Uint32Array(n);
+    this.#fillBelow(n, BigInt(range), 32, (i, x) => out[i] = Number(x));
+    return out;
+  }
+  fillU64Below(n: number, range: bigint): BigUint64Array {
+    const out = new BigUint64Array(n);
+    this.#fillBelow(n, range, 64, (i, x) => out[i] = x);
+    return out;
+  }
+
+  #fillBelow(n: number, range: bigint, w: 32 | 64, set: (i: number, x: bigint) => void): void {
+    if (n === 0) return;
+    const p = this.#span(this.#position, BigInt(n), w), g0 = p / BigInt(w);
+    for (let i = 0; i < n; i++) {
+      const raw = BigInt(this.#read(p + BigInt(w * i), w));
+      const fallback = () => this.sub(PURPOSE_BELOW[w]).split(g0 + BigInt(i));
+      let retry: Tandem | undefined;
+      set(
+        i,
+        this.#drawBelow(range, w, () => {
+          retry ??= fallback();
+          return BigInt(w === 32 ? retry.nextU32() : retry.nextU64());
+        }, raw),
+      );
+    }
+    this.#position = p + BigInt(w) * BigInt(n);
+  }
+
+  /** A standard normal from two uniform draws, the cosine half of the Box-Muller pair. */
+  nextNormalF64(): number {
+    return this.#pairF64()[0];
+  }
+  nextNormalF32(): number {
+    return this.#pairF32()[0];
+  }
+
+  /**
+   * Standard normals by Box-Muller. Elements 2j and 2j + 1 come from uniform draws 2j and
+   * 2j + 1, so an odd n still consumes both draws of its last pair.
+   */
+  fillNormalF64(n: number): Float64Array {
+    const out = new Float64Array(n);
+    for (let i = 0; i < n; i += 2) {
+      const z = this.#pairF64();
+      out[i] = z[0];
+      if (i + 1 < n) out[i + 1] = z[1];
+    }
+    return out;
+  }
+  /** Float32 normals from Float32 uniforms: the angle is taken in double and `cos` and `sin`
+   * are rounded to Float32, which is how the specification asks for it. */
+  fillNormalF32(n: number): Float32Array {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i += 2) {
+      const z = this.#pairF32();
+      out[i] = z[0];
+      if (i + 1 < n) out[i + 1] = z[1];
+    }
+    return out;
+  }
+
+  #pairF64(): [number, number] {
+    const a = this.nextF64(), b = this.nextF64();
+    const r = Math.sqrt(-2 * Math.log(1 - a)), [c, s] = cosSin2Pi(b);
+    return [r * c, r * s];
+  }
+  #pairF32(): [number, number] {
+    const a = this.nextF32(), b = this.nextF32();
+    const r = Math.fround(Math.sqrt(Math.fround(-2 * Math.fround(Math.log(1 - a)))));
+    const [c, s] = cosSin2Pi(b);
+    return [Math.fround(r * Math.fround(c)), Math.fround(r * Math.fround(s))];
   }
 
   /** Element i of the fill that would start here. The position does not move. */

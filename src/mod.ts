@@ -18,5 +18,5 @@ export {
   toFloat64,
 } from "./core.ts";
 export type { Key, State } from "./core.ts";
-export { fill, fillBuffer, fillMany, requestDevice } from "./gpu.ts";
+export { fill, fillBelow, fillBuffer, fillMany, fillNormal, requestDevice } from "./gpu.ts";
 export type { DType, Fill, FillOptions, HostDType } from "./gpu.ts";
