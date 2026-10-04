@@ -2,7 +2,14 @@
 // and the `Tandem` generator. Single steps use Math.imul and >>> 0, positions use BigInt, and
 // bulk output comes from the lane kernel in stream.ts.
 
-import { exponential32, exponential64, normalPairs32, normalPairs64 } from "./derived.ts";
+import {
+  type Draws64,
+  exponential32,
+  exponential64,
+  normalPairs32,
+  zigFast,
+  zigSlow,
+} from "./derived.ts";
 import { type Lanes, mulHi, newLanes, runRows, seedGroup, streamWords } from "./stream.ts";
 
 export type Key = readonly [number, number, number, number];
@@ -129,6 +136,8 @@ const POSITION_LIMIT = 1n << 64n;
 const LAST_ROW = POSITION_LIMIT - 1024n;
 // Purposes reserved for the fallback generators of bounded fills (Appendix A).
 const PURPOSE_BELOW = { 32: 0x424c573332n, 64: 0x424c573634n } as const;
+// The purpose reserved for the fallback generators of the Float64 normals (Appendix A).
+const PURPOSE_NORMAL64 = 0x4e524d3634n;
 // A scalar draw reads this many rows ahead, so a cold position costs one window and not a chunk.
 const WINDOW_ROWS = 8;
 const RANGE32 = 2 ** 32;
@@ -153,6 +162,31 @@ function mapF32(out: Float32Array, u: Uint32Array, n: number): void {
 }
 export function mapF64(out: Float64Array, u: Uint32Array, n: number): void {
   for (let i = 0; i < n; i++) out[i] = (u[2 * i + 1] * 2097152 + (u[2 * i] >>> 11)) * 2 ** -53;
+}
+
+/** The 64-bit draws of a generator from position 0, one block at a time. A missed normal reads
+ * a few draws, so it skips the eight-row window of a `Tandem`. */
+class BlockDraws implements Draws64 {
+  lo = 0;
+  hi = 0;
+  #key: Key;
+  #K: number;
+  #d = 0;
+  #b: Key = [0, 0, 0, 0];
+  constructor(key: Key, K: number) {
+    this.#key = key;
+    this.#K = K;
+  }
+  next(): void {
+    // Draw d is words 2 (d & 1) and 2 (d & 1) + 1 of block d >> 1, in row d >> 4.
+    const d = this.#d++;
+    if ((d & 1) === 0) {
+      const row = d >> 4, K = this.#K;
+      this.#b = block(this.#key, BigInt(8 * Math.floor(row / K) + ((d >> 1) & 7)), row % K);
+    }
+    this.lo = this.#b[2 * (d & 1)];
+    this.hi = this.#b[2 * (d & 1) + 1];
+  }
 }
 
 function checkRange32(range: number): void {
@@ -184,6 +218,7 @@ export class Tandem {
   #lanesAt = -1n; // the row the lanes step to next
   #cacheIndex = -1n;
   #cache: Key = [0, 0, 0, 0];
+  #zigKey: Key | undefined;
 
   constructor(key: Key, { position = 0n, K = DEFAULT_K }: { position?: bigint; K?: number } = {}) {
     checkK(K);
@@ -507,16 +542,20 @@ export class Tandem {
   }
 
   /**
-   * A standard normal pair from two uniform draws by Box-Muller, cosine half first, with the
-   * polynomial arithmetic of tandem-c, which makes the values equal to its bit for bit. The
-   * Float32 versions draw Float32 uniforms and compute in single precision.
+   * A standard normal by the 1024-layer ziggurat of Appendix A from one 64-bit draw. A draw
+   * that misses the inner rectangles continues on the fallback generator of its global draw
+   * index, which leaves this generator's position alone. The values equal tandem-c bit for bit.
    */
-  nextNormal2F64(): [number, number] {
-    pair[0] = this.nextF64();
-    pair[1] = this.nextF64();
-    normalPairs64(pair, 1);
-    return [pair[0], pair[1]];
+  nextNormalF64(): number {
+    const g = align(this.position, 64) >> 6n, [lo, hi] = this.nextU64Pair();
+    const z = zigFast(lo, hi);
+    return z === z ? z : zigSlow(lo, hi, this.#zigFallback(g));
   }
+  /**
+   * A standard normal pair from two Float32 uniform draws by Box-Muller, cosine half first, in
+   * single precision with the polynomial arithmetic of tandem-c, which makes the values equal
+   * to its bit for bit.
+   */
   nextNormal2F32(): [number, number] {
     pairF[0] = this.nextF32();
     pairF[1] = this.nextF32();
@@ -524,11 +563,28 @@ export class Tandem {
     return [pairF[0], pairF[1]];
   }
   /** The cosine half of the pair, which consumes both draws. */
-  nextNormalF64(): number {
-    return this.nextNormal2F64()[0];
-  }
   nextNormalF32(): number {
     return this.nextNormal2F32()[0];
+  }
+
+  /**
+   * Standard normals by the ziggurat. Element i comes from 64-bit draw i alone, so a fill cut
+   * at any element equals the whole fill. An empty fill aligns the position to 64 bits.
+   */
+  fillNormalF64(n: number | Float64Array): Float64Array {
+    const out = target(Float64Array, n), count = out.length, u = wordsOf(out);
+    const g = this.#stream(u, count, 64) >> 6n;
+    // Element i overwrites the words of draw i after reading them.
+    for (let i = 0; i < count; i++) {
+      const lo = u[2 * i], hi = u[2 * i + 1], z = zigFast(lo, hi);
+      out[i] = z === z ? z : zigSlow(lo, hi, this.#zigFallback(g + BigInt(i)));
+    }
+    return out;
+  }
+  /** The fallback generator of a missed normal at global draw index g. */
+  #zigFallback(g: bigint): Draws64 {
+    this.#zigKey ??= sub(this.#key, PURPOSE_NORMAL64);
+    return new BlockDraws(split(this.#zigKey, g), this.#K);
   }
 
   /**
@@ -536,14 +592,6 @@ export class Tandem {
    * 2j + 1, so an odd n still consumes both draws of its last pair. An empty fill moves
    * nothing.
    */
-  fillNormalF64(n: number | Float64Array): Float64Array {
-    const out = target(Float64Array, n), count = out.length, pairs = count >> 1;
-    if (count === 0) return out;
-    this.#uniformsF64(out, pairs * 2);
-    normalPairs64(out, pairs);
-    if (count & 1) out[count - 1] = this.nextNormal2F64()[0];
-    return out;
-  }
   fillNormalF32(n: number | Float32Array): Float32Array {
     const out = target(Float32Array, n), count = out.length, pairs = count >> 1;
     if (count === 0) return out;

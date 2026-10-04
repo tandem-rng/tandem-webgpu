@@ -73,10 +73,15 @@ jobs:
       - run: naga tandem.wgsl
       - run: cat tandem.wgsl tandem_f32.wgsl tandem_derived.wgsl > all.wgsl && naga all.wgsl
   vectors:
-    name: vectors are current
+    name: vectors and ziggurat tables are current
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - run: |
           git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
           diff ../tandem-spec/vectors.json tests/vectors.json
+          deno run --allow-read --allow-write tools/gen_zig_tables.ts ../tandem-spec/tables/normal_f64_zig1024.json
+          git diff --exit-code src/zig_tables.ts

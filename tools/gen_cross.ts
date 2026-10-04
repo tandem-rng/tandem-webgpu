@@ -6,12 +6,7 @@
 const SOURCES: Record<string, string[]> = {
   "../tandem-c/tests/cross_below.h": ["CROSS_U32", "CROSS_U64"],
   "../tandem-c/tests/cross_fill_below.h": ["CROSS_FILL_U32", "CROSS_FILL_U64"],
-  "../tandem-c/tests/cross_normal.h": [
-    "CROSS_NORMAL",
-    "CROSS_NORMAL_END_POS",
-    "CROSS_NORMALF",
-    "CROSS_NORMALF_END_POS",
-  ],
+  "../tandem-c/tests/cross_normal.h": ["CROSS_NORMAL", "CROSS_NORMALF", "CROSS_NORMALF_END_POS"],
   "../tandem-c/tests/cross_exponential.h": ["CROSS_EXPONENTIAL", "CROSS_EXPONENTIALF"],
   "../tandem-cuda/tests/cross_fill_below.h": [
     "CROSS_FILL_KEY",

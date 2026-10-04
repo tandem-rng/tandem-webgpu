@@ -1,7 +1,8 @@
 // The CPU path: scalar draws, fills, normals and exponentials against the reference ports.
 import { createHash } from "node:crypto";
 import { align, block, fillCpu, seed, Tandem } from "../src/mod.ts";
-import { COS_POLY, fma32, fma64, horner64, LOG_POLY, SIN_POLY } from "../src/derived.ts";
+import { fma32, fma64, horner64, LOG_POLY } from "../src/derived.ts";
+import { ZIG_K } from "../src/zig_tables.ts";
 import { assertEquals, assertThrows, test } from "./harness.ts";
 import cross from "./cross.json" with { type: "json" };
 
@@ -40,24 +41,39 @@ test("exponentials equal tandem-cuda fills bit for bit", () => {
   }
 });
 
-// The dumps of tandem-c's tools/dump_normals.c and tools/dump_exponentials.c: 1e6 values from
-// each of five start positions in both precisions, seed 2026 + 7 2^64, so the hash covers the
-// whole polynomial range on both precisions.
+// The hashes of tandem-c's tools/dump_normals.c, tests/test_normal_bits.c and
+// tools/dump_exponentials.c: fills from each of five start positions, seed 2026 + 7 2^64, so
+// the hashes cover the slow path of the ziggurat and the whole polynomial range.
 const HASH_KEY = seed(2026n + (7n << 64n));
 const HASH_STARTS = [0n, 1n, 77n, 12345n, 1n << 30n];
 const N = 1_000_000;
 
-test("1e6 normal pairs at five starts hash to the tandem-c dump", () => {
+test("1e6 Float64 normals at five starts hash to the tandem-c dump", () => {
   const hash = createHash("sha256");
   for (const position of HASH_STARTS) {
-    const g = new Tandem(HASH_KEY, { position });
-    hash.update(bytes(g.fillNormalF64(2 * N - 1)));
-    hash.update(bytes(g.fillNormalF32(2 * N - 1)));
+    hash.update(bytes(new Tandem(HASH_KEY, { position }).fillNormalF64(N)));
   }
   assertEquals(
     hash.digest("hex"),
-    "cfae418807a7d5f91ecd3e42c33a00943690c6e4b888ee39206738783efe9ded",
+    "700ec4d2f4d6b82aaa56c6eff18a4e5919585fdbd093988773383d580ea610d1",
   );
+});
+
+test("2e6 - 1 Float32 normals at five starts hash to the FNV-1a of tandem-c", () => {
+  // FNV-1a 64 in 32-bit halves, since a BigInt product per byte is slow: the prime is
+  // 2^40 + 435, and every partial sum stays below 2^53.
+  let lo = 0x84222325, hi = 0xcbf29ce4;
+  for (const position of HASH_STARTS) {
+    const b = bytes(new Tandem(HASH_KEY, { position }).fillNormalF32(2 * N - 1));
+    for (let i = 0; i < b.length; i++) {
+      lo = (lo ^ b[i]) >>> 0;
+      const p = lo * 435;
+      hi = (hi * 435 + Math.floor(p / 2 ** 32) + ((lo << 8) >>> 0)) >>> 0;
+      lo = p >>> 0;
+    }
+  }
+  const hex = (x: number) => x.toString(16).padStart(8, "0");
+  assertEquals(hex(hi) + hex(lo), "aa1ea656ce73a4fb");
 });
 
 test("1e6 exponentials at five starts hash to the tandem-c dump", () => {
@@ -223,14 +239,12 @@ test("the Horner steps of the polynomials equal the chain of exact fused steps",
     state = (state * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
     return Number(state >> 11n) * 2 ** -53;
   };
-  // The ranges of the arguments: s^2 of the logarithm, and the squared angle of cos and sin.
-  for (const [poly, top] of [[LOG_POLY, 0.0295], [SIN_POLY, 0.62], [COS_POLY, 0.62]] as const) {
-    for (let i = 0; i < 20000; i++) {
-      const w = i % 50 === 0 ? rand() * 2 ** -40 : rand() * top;
-      let acc = poly[0];
-      for (let k = 1; k < poly.length; k++) acc = exactFma(w, acc, poly[k], 53);
-      assertEquals(horner64(w, poly), acc, `w = ${w}`);
-    }
+  // w is s^2 of the logarithm, at most 0.0295.
+  for (let i = 0; i < 20000; i++) {
+    const w = i % 50 === 0 ? rand() * 2 ** -40 : rand() * 0.0295;
+    let acc = LOG_POLY[0];
+    for (let k = 1; k < LOG_POLY.length; k++) acc = exactFma(w, acc, LOG_POLY[k], 53);
+    assertEquals(horner64(w, LOG_POLY), acc, `w = ${w}`);
   }
 });
 
@@ -309,7 +323,7 @@ test("fills into a caller array equal the allocating fills and touch nothing els
   }
 });
 
-test("empty fills align the plain kinds and leave the derived kinds where they were", () => {
+test("empty fills align the plain kinds and the f64 normals, and leave the rest alone", () => {
   const key = seed(6n);
   const run = (fill: (g: Tandem) => unknown) => {
     const g = new Tandem(key, { position: 5n });
@@ -323,12 +337,12 @@ test("empty fills align the plain kinds and leave the derived kinds where they w
   assertEquals(run((g) => g.fillF32(0)), 32n);
   assertEquals(run((g) => g.fillF64(0)), 64n);
   assertEquals(run((g) => g.fillBool(0)), 5n);
+  assertEquals(run((g) => g.fillNormalF64(0)), 64n);
   for (
     const fill of [
       (g: Tandem) => g.fillU32Below(0, 7),
       (g: Tandem) => g.fillU64Below(0, 7n),
       (g: Tandem) => g.fillNormalF32(0),
-      (g: Tandem) => g.fillNormalF64(0),
       (g: Tandem) => g.fillExponentialF32(0),
       (g: Tandem) => g.fillExponentialF64(0),
     ]
@@ -371,7 +385,6 @@ test("normal and exponential fills cut at an element boundary equal the whole fi
       new Tandem(key, { position: align(start, bits) + BigInt(bits * count), K });
     const fresh = () => new Tandem(key, { position: start, K });
     const w = {
-      n64: fresh().fillNormalF64(300),
       n32: fresh().fillNormalF32(300),
       e64: fresh().fillExponentialF64(300),
       e32: fresh().fillExponentialF32(300),
@@ -380,11 +393,32 @@ test("normal and exponential fills cut at an element boundary equal the whole fi
       const [lo, hi] = [cuts[c], cuts[c + 1]];
       assertEquals(at(64, lo).fillExponentialF64(hi - lo), w.e64.subarray(lo, hi));
       assertEquals(at(32, lo).fillExponentialF32(hi - lo), w.e32.subarray(lo, hi));
-      // A pair is two draws, so a normal fill cuts at even elements.
+      // A pair is two draws, so a Float32 normal fill cuts at even elements.
       const even = lo - (lo % 2), n = Math.min(hi - even, 300 - even);
-      assertEquals(at(64, even).fillNormalF64(n), w.n64.subarray(even, even + n), `K=${K} ${lo}`);
       assertEquals(at(32, even).fillNormalF32(n), w.n32.subarray(even, even + n), `K=${K} ${lo}`);
     }
+  }
+});
+
+test("a Float64 normal fill cut at a miss equals the whole fill and the scalar draws", () => {
+  const key = seed(21n), start = 37n, p = align(start, 64), n = 3000;
+  for (const K of [32, 8]) {
+    // The draws that miss the inner rectangles and take the fallback generator.
+    const raw = new Tandem(key, { position: start, K }).fillU64(n);
+    const misses = [...raw.keys()].filter((i) =>
+      raw[i] >> 11n >= BigInt(ZIG_K[Number(raw[i] & 1023n)])
+    );
+    assertEquals(misses.length >= 3, true);
+    const whole = new Tandem(key, { position: start, K }).fillNormalF64(n);
+    const cuts = [0, misses[0], misses[0] + 1, misses[2], n];
+    for (let c = 0; c + 1 < cuts.length; c++) {
+      const [a, b] = [cuts[c], cuts[c + 1]];
+      const g = new Tandem(key, { position: p + 64n * BigInt(a), K });
+      assertEquals(g.fillNormalF64(b - a), whole.subarray(a, b), `K=${K} [${a},${b})`);
+    }
+    const one = new Tandem(key, { position: start, K });
+    assertEquals(Float64Array.from({ length: n }, () => one.nextNormalF64()), whole);
+    assertEquals(one.position, p + 64n * BigInt(n));
   }
 });
 
@@ -436,7 +470,7 @@ test("fillCpu returns the typed arrays and end position of fill, signed types in
   assertEquals(below.values, new Tandem(key, { position }).fillU64Below(50, 1000n));
   const z = fillCpu({ key, position, count: 51, dtype: "f64", normal: true });
   assertEquals(z.values, new Tandem(key, { position }).fillNormalF64(51));
-  assertEquals(z.position, align(position, 64) + 64n * 52n);
+  assertEquals(z.position, align(position, 64) + 64n * 51n);
   const e = fillCpu({ key, position, count: 51, dtype: "f32", exponential: true });
   assertEquals(e.values, new Tandem(key, { position }).fillExponentialF32(51));
 });

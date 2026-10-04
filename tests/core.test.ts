@@ -261,12 +261,18 @@ test("a bounded fill cut at any boundary equals the whole fill", () => {
   }
 });
 
-test("normals equal tandem-c bit for bit from an unaligned start", () => {
-  const f64 = new Tandem(seed(42n));
-  f64.nextBool();
-  const want64 = Float64Array.from(cross.CROSS_NORMAL as number[]);
-  assertEquals(f64.fillNormalF64(want64.length), want64);
-  assertEquals(f64.position, BigInt(cross.CROSS_NORMAL_END_POS));
+type CNormal = [string, number[], string]; // start position, 64 values, end position
+
+test("normals equal tandem-c bit for bit, every ziggurat path included", () => {
+  // The last rows hold a wedge accept, a wedge reject and a tail draw at element 20.
+  for (const [start, want, end] of cross.CROSS_NORMAL as unknown as CNormal[]) {
+    const fill = new Tandem(seed(42n), { position: BigInt(start) });
+    assertEquals(fill.fillNormalF64(want.length), Float64Array.from(want), `f64 from ${start}`);
+    assertEquals(fill.position, BigInt(end));
+    const one = new Tandem(seed(42n), { position: BigInt(start) });
+    assertEquals(want.map(() => one.nextNormalF64()), want);
+    assertEquals(one.position, BigInt(end));
+  }
   const f32 = new Tandem(seed(42n));
   f32.nextBool();
   const want32 = Float32Array.from(cross.CROSS_NORMALF as number[]);
@@ -276,8 +282,9 @@ test("normals equal tandem-c bit for bit from an unaligned start", () => {
 
 test("normals equal tandem-cuda fills bit for bit at several positions, odd counts included", () => {
   for (const [pos, n, want] of cross.CROSS_NORMAL64 as unknown as DeviceNormal[]) {
-    const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillNormalF64(n);
-    assertEquals(got, Float64Array.from(want.slice(0, n)), `f64 from ${pos}`);
+    const g = new Tandem(FIXTURE_KEY, { position: BigInt(pos) });
+    assertEquals(g.fillNormalF64(n), Float64Array.from(want.slice(0, n)), `f64 from ${pos}`);
+    assertEquals(g.position, align(BigInt(pos), 64) + 64n * BigInt(n));
   }
   for (const [pos, n, want] of cross.CROSS_NORMAL32 as unknown as DeviceNormal[]) {
     const g = new Tandem(FIXTURE_KEY, { position: BigInt(pos) });
@@ -286,10 +293,11 @@ test("normals equal tandem-cuda fills bit for bit at several positions, odd coun
   }
 });
 
-test("a scalar normal is the cosine half of the pair and consumes two draws", () => {
+test("a scalar f64 normal takes one draw, an f32 normal the two draws of its pair", () => {
   const g = Tandem.seed(8n), h = Tandem.seed(8n);
   assertEquals(g.nextNormalF64(), h.fillNormalF64(1)[0]);
-  assertEquals(g.position, 128n);
+  assertEquals(g.position, 64n);
   assertEquals(g.nextNormalF32(), h.fillNormalF32(2)[0]);
+  assertEquals(g.position, 128n);
   assertEquals(new Tandem(KEY, { position: 5n }).fillNormalF32(0).length, 0);
 });

@@ -1,7 +1,8 @@
-// Normals and exponentials on the CPU with the arithmetic of tandem-c: a short polynomial
-// logarithm, Taylor series for cos and sin, and an explicit fused multiply-add at every
-// multiply-add. JavaScript has no fma, so `fma64` and `fma32` emulate it exactly, which makes
-// the values equal tandem-c bit for bit on any engine.
+// Normals and exponentials on the CPU with the arithmetic of tandem-c: the Float64 ziggurat
+// with the spec's tables, a short polynomial logarithm, Taylor series for cos and sin, and an
+// explicit fused multiply-add at every multiply-add. JavaScript has no fma, so `fma64` and
+// `fma32` emulate it exactly, which makes the values equal tandem-c bit for bit on any engine.
+import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
 const U32 = new Uint32Array(F64.buffer);
@@ -42,8 +43,8 @@ export function fma64(a: number, b: number, c: number): number {
 
 /** The polynomial c[0] w^(n-1) + ... + c[n-1] by fused Horner steps, as the nested fma calls of
  * tandem-c. The split of w is shared by all steps. Each step adds the coefficient to a product
- * that is smaller in magnitude, which holds for the polynomials below with w up to 0.62, so the
- * sum needs only Fast2Sum, and the lost part of the second sum is read only on a tie. */
+ * that is smaller in magnitude, which holds for the logarithm's polynomial below, so the sum
+ * needs only Fast2Sum, and the lost part of the second sum is read only on a tie. */
 export function horner64(w: number, c: Float64Array): number {
   const t0 = SPLIT * w, wh = t0 - (t0 - w), wl = w - wh;
   let acc = c[0];
@@ -128,56 +129,51 @@ export function neg2Log32(x: number): number {
   return fma32(nk, L32_LO, fma32(nk, L32_HI, fr(fr(s * -4) * p)));
 }
 
-export const SIN_POLY = Float64Array.of(
-  1.5914650986900946e-10,
-  -2.5051097984389413e-08,
-  2.755731600073921e-06,
-  -0.00019841269836630226,
-  0.008333333333330813,
-  -0.16666666666666669,
-  1.0,
-);
-export const COS_POLY = Float64Array.of(
-  2.0665708703855164e-09,
-  -2.7555858522576447e-07,
-  2.480158263811954e-05,
-  -0.0013888888882156126,
-  0.04166666666663108,
-  -0.4999999999999997,
-  1.0,
-);
+// The widths W[i] for a clear sign bit and -W[i] at 1024 + i for a set one, so the table index
+// is the low 11 bits of a draw and the sign needs no branch.
+const ZW = new Float64Array(2048);
+ZW.set(ZIG_W);
+for (let i = 0; i < 1024; i++) ZW[1024 + i] = -ZIG_W[i];
 
-/** In place, z[2j], z[2j + 1] = Box-Muller of the uniforms (z[2j], z[2j + 1]), cos half first,
- * for the first m pairs. */
-export function normalPairs64(z: Float64Array, m: number): void {
-  for (let j = 0; j < m; j++) {
-    const a = z[2 * j], b = z[2 * j + 1];
-    const r = Math.sqrt(neg2Log64(1 - a));
-    // The nearest quarter turn q leaves an angle in [-pi/4, pi/4] with no range reduction.
-    const q = Math.floor(b * 4 + 0.5);
-    const f = b - q * 0.25, th = f * 6.283185307179586, w = th * th;
-    const sn = th * horner64(w, SIN_POLY), cs = horner64(w, COS_POLY);
-    // A quarter-turn rotation: odd q swaps cos and sin, then the signs follow the quadrant.
-    let x: number, y: number;
-    switch (q & 3) {
-      case 0:
-        x = cs;
-        y = sn;
-        break;
-      case 1:
-        x = -sn;
-        y = cs;
-        break;
-      case 2:
-        x = -cs;
-        y = -sn;
-        break;
-      default:
-        x = sn;
-        y = -cs;
+/** The fast path of the Float64 ziggurat (Appendix A) for the 64-bit draw with words lo and hi:
+ * the normal, or NaN when the draw misses the inner rectangle of its layer. */
+export function zigFast(lo: number, hi: number): number {
+  const ra = hi * 2097152 + (lo >>> 11);
+  return ra < ZIG_K[lo & 1023] ? ra * ZW[lo & 2047] : NaN;
+}
+
+/** The 64-bit draws of a generator in sequence, as the words of the last one. */
+export interface Draws64 {
+  lo: number;
+  hi: number;
+  next(): void;
+}
+
+const uniform = (f: Draws64) => {
+  f.next();
+  return (f.hi * 2097152 + (f.lo >>> 11)) * 2 ** -53;
+};
+
+/** The slow path of the ziggurat from a missed draw, on the draws of its fallback generator.
+ * ln y is -0.5 neg2Log64(y), and every other operation rounds once, as in tandem-c. */
+export function zigSlow(lo: number, hi: number, f: Draws64): number {
+  for (;;) {
+    const i = lo & 1023, ra = hi * 2097152 + (lo >>> 11), x = ra * ZW[lo & 2047];
+    if (ra < ZIG_K[i]) return x;
+    if (i === 0) {
+      // The tail beyond R, by Marsaglia's method.
+      let a: number, b: number;
+      do {
+        a = 0.5 * neg2Log64(1 - uniform(f)) / ZIG_R;
+        b = 0.5 * neg2Log64(1 - uniform(f));
+      } while (b + b < a * a);
+      return lo & 1024 ? -(ZIG_R + a) : ZIG_R + a;
     }
-    z[2 * j] = r * x;
-    z[2 * j + 1] = r * y;
+    const y = ZIG_Y[i] + uniform(f) * (ZIG_Y[i + 1] - ZIG_Y[i]);
+    if (-0.5 * neg2Log64(y) < -0.5 * (x * x)) return x;
+    f.next();
+    lo = f.lo;
+    hi = f.hi;
   }
 }
 
