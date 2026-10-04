@@ -446,15 +446,28 @@ export class Tandem {
   }
   fillU64Below(n: number | BigUint64Array, range: bigint): BigUint64Array {
     checkRange64(range);
-    const out = target(BigUint64Array, n), count = out.length;
+    const out = target(BigUint64Array, n), count = out.length, u = wordsOf(out);
     if (count === 0) return out;
-    const g0 = this.#stream(wordsOf(out), count, 64) >> 6n;
+    const g0 = this.#stream(u, count, 64) >> 6n;
+    if (range === POSITION_LIMIT) return out;
     if (range === 0n) return out.fill(0n);
     const t = (POSITION_LIMIT - range) % range;
+    const rl = Number(range & MASK32), rh = Number(range >> 32n);
+    const tl = Number(t & MASK32), th = Number(t >> 32n);
+    // The 128-bit product x * range in words w0 to w3, from 32-bit products, since a BigInt
+    // product per element is ten times slower. The partial sums stay below 2^34, exact.
     for (let i = 0; i < count; i++) {
-      const m = out[i] * range;
-      if ((m & MASK64) < t) out[i] = this.#retry64(g0 + BigInt(i), range, t);
-      else out[i] = m >> 64n;
+      const xl = u[2 * i], xh = u[2 * i + 1], w0 = Math.imul(xl, rl) >>> 0;
+      const s1 = mulHi(xl, rl) + (Math.imul(xl, rh) >>> 0) + (Math.imul(xh, rl) >>> 0);
+      const w1 = s1 >>> 0;
+      if (w1 < th || (w1 === th && w0 < tl)) {
+        out[i] = this.#retry64(g0 + BigInt(i), range, t);
+        continue;
+      }
+      const s2 = mulHi(xl, rh) + mulHi(xh, rl) + (Math.imul(xh, rh) >>> 0) +
+        Math.floor(s1 / RANGE32);
+      u[2 * i] = s2 >>> 0;
+      u[2 * i + 1] = mulHi(xh, rh) + Math.floor(s2 / RANGE32);
     }
     return out;
   }
