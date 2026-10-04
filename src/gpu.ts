@@ -75,10 +75,20 @@ type Job = {
   extra?: Uint32Array<ArrayBuffer>;
   workgroups: [number, number];
   buffer: GPUBuffer;
+  /** The bound window of `buffer`, never larger than the adapter's binding limit. */
+  offset: number;
+  size: number;
 };
 
 const MAX_WORKGROUPS = 65535;
 const PAIR_THREADS = 256;
+
+/** Largest window one dispatch may bind: the binding limit, and what 65535 workgroups reach. */
+function windowBytes(device: GPUDevice, K: number): number {
+  const step = Math.max(256, device.limits.minStorageBufferOffsetAlignment);
+  const reach = (MAX_WORKGROUPS * GROUPS - 1) * 128 * K;
+  return Math.floor(Math.min(device.limits.maxStorageBufferBindingSize, reach) / step) * step;
+}
 
 /** Validate one fill, allocate its buffer and compute its dispatches. Touches no queue. */
 function plan(
@@ -111,12 +121,8 @@ function plan(
   if (buffer && buffer.size < nBlocks * 16) {
     throw new RangeError(`buffer holds ${buffer.size} bytes, the fill needs ${nBlocks * 16}`);
   }
-  const rowsPerGroup = BigInt(K);
-  const g0 = (blockStart >> 3n) / rowsPerGroup;
-  const g1 = ((blockEnd - 1n) >> 3n) / rowsPerGroup;
-  const workgroups = nBlocks === 0 ? 0 : Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
-  if (workgroups > MAX_WORKGROUPS) {
-    throw new RangeError("fill too large for one dispatch: split the fill by position");
+  if (!buffer && nBlocks * 16 > device.limits.maxBufferSize) {
+    throw new RangeError(`the fill needs ${nBlocks * 16} bytes, over maxBufferSize`);
   }
   buffer ??= device.createBuffer({ size: Math.max(16, nBlocks * 16), usage: STORAGE | COPY_SRC });
   // A derived fill with no elements draws nothing, so it does not even align the position.
@@ -129,36 +135,63 @@ function plan(
   };
   if (nBlocks === 0 || (derived && count === 0)) return { placed, jobs: [] };
 
-  const params = new Uint32Array(12);
-  params.set(key, 0);
-  params[4] = Number(g0 & 0xffffffffn);
-  params[5] = Number(g0 >> 32n);
-  params[6] = Number(blockStart & 0xffffffffn);
-  params[7] = Number(blockStart >> 32n);
-  params[8] = nBlocks;
-  params[9] = K;
   const entry: Entry = range !== undefined
     ? (w === 32 ? "fill_below32" : "fill_below64")
     : floats || normal
     ? "fill_f32"
     : "fill";
-  const fillJob: Job = { entry, params, workgroups: [workgroups, 1], buffer };
-  if (range !== undefined) {
-    fillJob.extra = new Uint32Array([Number(bound & 0xffffffffn), Number(bound >> 32n), 0, 0]);
-  }
-  if (!normal) return { placed, jobs: [fillJob] };
+  const extra = range !== undefined
+    ? new Uint32Array([Number(bound & 0xffffffffn), Number(bound >> 32n), 0, 0])
+    : undefined;
 
+  // Every fill is exact at any block boundary, so the buffer is cut into windows that each fit
+  // one binding and one dispatch. A window starts at a multiple of the offset alignment.
+  const win = windowBytes(device, K);
+  const rowsPerGroup = BigInt(K);
+  const jobs: Job[] = [];
+  for (let offset = 0; offset < nBlocks * 16; offset += win) {
+    const size = Math.min(win, nBlocks * 16 - offset);
+    const first = blockStart + BigInt(offset / 16);
+    const last = first + BigInt(size / 16) - 1n;
+    const g0 = (first >> 3n) / rowsPerGroup;
+    const g1 = (last >> 3n) / rowsPerGroup;
+    const params = new Uint32Array(12);
+    params.set(key, 0);
+    params[4] = Number(g0 & 0xffffffffn);
+    params[5] = Number(g0 >> 32n);
+    params[6] = Number(first & 0xffffffffn);
+    params[7] = Number(first >> 32n);
+    params[8] = size / 16;
+    params[9] = K;
+    const workgroups = Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
+    jobs.push({ entry, params, extra, workgroups: [workgroups, 1], buffer, offset, size });
+  }
+  if (!normal) return { placed, jobs };
+
+  // Pair chunks start at even elements, so a pair never straddles a window. Pair windows are
+  // laid over the elements, after every fill window has written its raw words.
+  const slot0 = byteOffset / 4;
+  const pairsPerWindow = win / 8 - 32;
   const pairs = Math.ceil(count / 2);
-  const groups = Math.ceil(pairs / PAIR_THREADS);
-  const x = Math.min(groups, MAX_WORKGROUPS), y = Math.ceil(groups / x);
-  if (y > MAX_WORKGROUPS) throw new RangeError("fill too large for one dispatch");
-  const pairJob: Job = {
-    entry: "normal_pairs",
-    extra: new Uint32Array([byteOffset / 4, count, pairs, x]),
-    workgroups: [x, y],
-    buffer,
-  };
-  return { placed, jobs: [fillJob, pairJob] };
+  for (let j0 = 0; j0 < pairs; j0 += pairsPerWindow) {
+    const n = Math.min(2 * pairsPerWindow, count - 2 * j0);
+    const chunkPairs = Math.ceil(n / 2);
+    const start = slot0 + 2 * j0;
+    const offset = Math.floor(start * 4 / 256) * 256;
+    const size = Math.min(win, nBlocks * 16 - offset);
+    const groups = Math.ceil(chunkPairs / PAIR_THREADS);
+    const x = Math.min(groups, MAX_WORKGROUPS), y = Math.ceil(groups / x);
+    if (y > MAX_WORKGROUPS) throw new RangeError("fill too large for one dispatch");
+    jobs.push({
+      entry: "normal_pairs",
+      extra: new Uint32Array([start - offset / 4, n, chunkPairs, x]),
+      workgroups: [x, y],
+      buffer,
+      offset,
+      size,
+    });
+  }
+  return { placed, jobs };
 }
 
 /** Encode every job into one compute pass and submit once. */
@@ -177,9 +210,9 @@ async function dispatch(device: GPUDevice, jobs: Job[]): Promise<void> {
     uniforms.push(u);
     return u;
   };
-  for (const { entry, params, extra, workgroups, buffer } of jobs) {
+  for (const { entry, params, extra, workgroups, buffer, offset, size } of jobs) {
     const pipeline = pipelines.get(entry)!;
-    const entries: GPUBindGroupEntry[] = [{ binding: 1, resource: { buffer } }];
+    const entries: GPUBindGroupEntry[] = [{ binding: 1, resource: { buffer, offset, size } }];
     if (params) entries.push({ binding: 0, resource: { buffer: uniform(params) } });
     if (extra) entries.push({ binding: 2, resource: { buffer: uniform(extra) } });
     pass.setPipeline(pipeline);

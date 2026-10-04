@@ -66,6 +66,12 @@ your own. `fill` leaves a buffer you pass alive and destroys only the buffers it
 compute pass and submits once, then returns one result per item in order. It checks all items
 before it submits, and items run in order, so they may share a buffer.
 
+A fill larger than the adapter's `maxStorageBufferBindingSize` needs no special call. Every fill
+is exact at any block boundary, so `fillBuffer`, `fill`, `fillBelow`, `fillNormal` and `fillMany`
+bind the buffer in windows of at most that size, at offsets that meet the offset alignment, and
+dispatch each one. The normal pass cuts at even elements. The buffer itself must still fit
+`maxBufferSize`, and a fill that needs more throws a `RangeError`.
+
 Bounded integers and normals follow Appendix A of the specification. `fillBelow(device, {...,
 dtype: "u32" | "u64", range})` returns values in `[0, range)` by Lemire's method. Element `i`
 takes draw `i`, and a draw that Lemire rejects retries on a fallback generator keyed by the
@@ -123,7 +129,9 @@ mapped values and that without it the buffer keeps raw words. It checks that `fi
 the same values as single fills for mixed dtypes, positions, K and caller buffers, and that `fill` can reuse a caller buffer across two fills. It checks the GPU bounded fills against the same fixtures and the CPU class across ranges with
 many rejections, K and start positions, and the GPU normals against the fixtures to 16 ulps
 plus 1e-6, against the CPU class across the two-dimensional pair dispatch, and in `fillMany`.
-The GPU tests skip when no adapter exists. CI runs them with
+It checks that every dtype, bounded and normal fill, and `fillMany`, under a binding limit
+shrunk to a few windows, equals the unchunked fill, and that a fill just over the real limit
+of a software adapter equals the CPU class at the window boundary and the end. The GPU tests skip when no adapter exists. CI runs them with
 a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with
 `naga`, and fails when the embedded shader or the vectors drift.
 

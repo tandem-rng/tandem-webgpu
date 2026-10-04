@@ -358,3 +358,119 @@ Deno.test(
     assertEquals(values.length, n);
   },
 );
+
+/** The same device with a smaller binding limit, so small fills take the chunked path. */
+function withBindingLimit(real: GPUDevice, maxStorageBufferBindingSize: number): GPUDevice {
+  const limits = new Proxy(real.limits, {
+    get: (t, k) =>
+      k === "maxStorageBufferBindingSize" ? maxStorageBufferBindingSize : t[k as never],
+  });
+  return new Proxy(real, {
+    get: (t, k) => {
+      if (k === "limits") return limits;
+      const v = t[k as never] as unknown;
+      return typeof v === "function" ? v.bind(t) : v;
+    },
+  });
+}
+
+Deno.test(
+  { name: "every fill under a small binding limit equals the unchunked fill", ...gpu },
+  async () => {
+    const key = seed(5n);
+    for (const limit of [1024, 2816, 65536]) {
+      const small = withBindingLimit(device!, limit);
+      for (const K of [1, 8, 32]) {
+        for (const position of [0n, 32n, 96n + 7n, 128n * 41n + 64n]) {
+          const o = { key, position, K, count: 20001 };
+          const at = `limit ${limit} K ${K} from ${position}`;
+          for (const dtype of ["u8", "u16", "u32", "u64", "f32", "f64"] as const) {
+            assertEquals(
+              await fill(small, { ...o, dtype }),
+              await fill(device!, { ...o, dtype }),
+              `${dtype} ${at}`,
+            );
+          }
+          for (const dtype of ["u32", "u64"] as const) {
+            assertEquals(
+              await fillBelow(small, { ...o, dtype, range: 1000 }),
+              await fillBelow(device!, { ...o, dtype, range: 1000 }),
+              `below ${dtype} ${at}`,
+            );
+          }
+          for (const count of [20001, 20000]) {
+            assertEquals(
+              await fillNormal(small, { ...o, count }),
+              await fillNormal(device!, { ...o, count }),
+              `normal ${count} ${at}`,
+            );
+          }
+        }
+      }
+    }
+  },
+);
+
+Deno.test(
+  { name: "fillMany and a caller buffer under a small binding limit", ...gpu },
+  async () => {
+    const small = withBindingLimit(device!, 1024);
+    const key = seed(6n);
+    const items = [
+      { key, count: 5000, dtype: "u32" as const },
+      { key, position: 32n, count: 3001, dtype: "f32" as const, normal: true },
+    ];
+    const got = await fillMany(small, items);
+    const want = await fillMany(device!, items);
+    for (let i = 0; i < items.length; i++) {
+      assertEquals(
+        await readBytes(got[i].buffer, got[i].byteOffset, got[i].byteLength),
+        await readBytes(want[i].buffer, want[i].byteOffset, want[i].byteLength),
+      );
+      assertEquals(got[i].position, want[i].position);
+    }
+  },
+);
+
+Deno.test(
+  { name: "a fill just over the adapter's binding limit equals the CPU fill", ...gpu },
+  async (t) => {
+    const limit = device!.limits.maxStorageBufferBindingSize;
+    // Only an adapter with a small limit, such as a software one, makes this affordable.
+    if (limit > 2 ** 28 || device!.limits.maxBufferSize < limit + 4096) return;
+    const key = seed(8n), position = 32n * 3n;
+    const n = limit / 4 + 1000;
+    // Windows around the binding boundary and the end, as the CPU class draws them.
+    const checks = (
+      got: ArrayLike<number | bigint>,
+      want: (start: number, len: number) => unknown[],
+    ) => {
+      for (const start of [0, limit / 4 - 40, n - 40]) {
+        assertEquals(Array.from(got as ArrayLike<never>).slice(start, start + 40), want(start, 40));
+      }
+    };
+    const cpu = (start: number) => new Tandem(key, { position: position + 32n * BigInt(start) });
+    await t.step("u32", async () => {
+      const { values } = await fill(device!, { key, position, count: n, dtype: "u32" });
+      assertEquals(values.length, n);
+      checks(values, (s, l) => Array.from(cpu(s).fillU32(l)));
+    });
+    await t.step("bounded", async () => {
+      const { values } = await fillBelow(device!, {
+        key,
+        position,
+        count: n,
+        dtype: "u32",
+        range: 1000,
+      });
+      checks(values, (s, l) => Array.from(cpu(s).fillU32Below(l, 1000)));
+    });
+    await t.step("normal", async () => {
+      const { values } = await fillNormal(device!, { key, position, count: n });
+      for (const start of [0, limit / 4 - 40, n - 40]) {
+        const want = cpu(start).fillNormalF32(40);
+        assertEquals(want.every((z, i) => near32(values[start + i], z)), true, `from ${start}`);
+      }
+    });
+  },
+);
