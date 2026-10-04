@@ -42,16 +42,22 @@ rng.atU32(5n);                                  // element 5 of the next fill, p
 const child = rng.split(7);                     // also sub(purpose) and fork(n), as Tandem objects
 ```
 
-`dtype` is one of `u8`, `u16`, `u32`, `u64`, `f32`, `f64`. The `fill` entry point writes stream
-words. `fill` of `f32` runs `fill_f32`, which applies the spec's mapping `(raw >> 8) * 2^-24` on
-the GPU, and `fill` of `f64` applies `(raw >> 11) * 2^-53` on the host. `fillBuffer` returns a
-storage buffer of whole 16-byte stream blocks plus the byte offset of the first value, holding
-raw words unless you pass `floats: true` with `dtype: "f32"`, which stores Float32 values for a
-later GPU stage. Pass `buffer` to write into your own. `fillMany(device, items)` takes an array of the same
-options, encodes every dispatch into one compute pass and submits once, then returns one result
-per item in order. It checks all items before it submits, and items run in order, so they may
-share a buffer. There is no `f64` on the GPU: WGSL has
-no 64-bit float type, so `f64` stays a host mapping of the `u64` words.
+`fill` takes `dtype` `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64` or
+`bool`. The signed types read the unsigned words two's complement on the host, and `bool`
+returns a Uint8Array of 0 and 1, one stream bit each from `position`. `fillBuffer` and
+`fillMany` take the unsigned and float types.
+
+The `fill` entry point writes stream words. `fill` of `f32` runs `fill_f32`, which applies the
+spec's mapping `(raw >> 8) * 2^-24` on the GPU, and `fill` of `f64` applies `(raw >> 11) * 2^-53`
+on the host. There is no `f64` on the GPU: WGSL has no 64-bit float type, so `f64` stays a host
+mapping of the `u64` words. `fillBuffer` returns a storage buffer of whole 16-byte stream blocks
+plus the byte offset of the first value. It holds raw words unless you pass `floats: true` with
+`dtype: "f32"`, which stores Float32 values for a later GPU stage. Pass `buffer` to write into
+your own.
+
+`fillMany(device, items)` takes an array of the same options, encodes every dispatch into one
+compute pass and submits once, then returns one result per item in order. It checks all items
+before it submits, and items run in order, so they may share a buffer.
 
 `Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
 `chunkLength`. Its draws are the spec's scalar draws: `nextU8`, `nextU16`, `nextU32`, `nextU64`,
@@ -72,7 +78,8 @@ its fills against every dump in `tests/data` at K = 32 and K = 8, its mixed-widt
 fills from mid-stream positions, its derived generators, and the 2^64 position bound. `tests/gpu.test.ts` checks the
 GPU fill against the vectors and against reference stream dumps in `tests/data`
 for u32 at K = 32 and K = 8, u64, f32, f64 and u8, from several start positions
-and across workgroup boundaries. It also checks that `fillBuffer` with `floats` holds the
+and across workgroup boundaries, the signed types against the dump bytes, and `bool` against the
+spec's bit vectors and the CPU class from a mid-word start. It also checks that `fillBuffer` with `floats` holds the
 mapped values and that without it the buffer keeps raw words. It checks that `fillMany` returns
 the same values as single fills for mixed dtypes, positions, K and caller buffers. The GPU tests skip when no adapter exists. CI runs them with
 a software Vulkan adapter on Linux and on the macOS runner's GPU, validates the shader with

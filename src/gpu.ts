@@ -159,21 +159,40 @@ export async function fillBuffer(device: GPUDevice, options: FillOptions): Promi
   return (await fillMany(device, [options]))[0];
 }
 
-type Values<D extends DType> = D extends "u8" ? Uint8Array
+/** Element types `fill` returns. `fillBuffer` takes `DType` only. */
+export type HostDType = DType | "bool" | "i8" | "i16" | "i32" | "i64";
+type FillRequest<D> = Omit<FillOptions, "floats" | "dtype"> & { dtype: D };
+
+type Values<D extends HostDType> = D extends "u8" | "bool" ? Uint8Array
   : D extends "u16" ? Uint16Array
   : D extends "u32" ? Uint32Array
   : D extends "u64" ? BigUint64Array
+  : D extends "i8" ? Int8Array
+  : D extends "i16" ? Int16Array
+  : D extends "i32" ? Int32Array
+  : D extends "i64" ? BigInt64Array
   : D extends "f32" ? Float32Array
   : Float64Array;
 
-/** Fill on the GPU and read back a typed array of `dtype`, plus the successor position. */
-export async function fill<D extends DType>(
+// A signed integer is the unsigned word read two's complement, so the same stream bytes serve.
+const SAME_BYTES = { i8: "u8", i16: "u16", i32: "u32", i64: "u64" } as const;
+
+/**
+ * Fill on the GPU and read back a typed array of `dtype`, plus the successor position. `bool`
+ * returns a Uint8Array of 0 and 1, bit i of the stream from the position.
+ */
+export async function fill<D extends HostDType>(
   device: GPUDevice,
-  options: Omit<FillOptions, "floats"> & { dtype: D },
+  options: FillRequest<D>,
 ): Promise<Fill<Values<D>>> {
+  if (options.dtype === "bool") return await fillBool(device, options) as Fill<Values<D>>;
+  const dtype = options.dtype in SAME_BYTES
+    ? SAME_BYTES[options.dtype as keyof typeof SAME_BYTES]
+    : options.dtype as DType;
   const { buffer, byteOffset, byteLength, position } = await fillBuffer(device, {
     ...options,
-    floats: options.dtype === "f32",
+    dtype,
+    floats: dtype === "f32",
   });
   const staging = device.createBuffer({
     size: buffer.size,
@@ -190,7 +209,27 @@ export async function fill<D extends DType>(
   return { values: convert(bytes, options.dtype) as Values<D>, position };
 }
 
-function convert(bytes: ArrayBuffer, dtype: DType) {
+/** Bits are unaligned to bytes, so read whole words that cover them and cut the bits out. */
+async function fillBool(
+  device: GPUDevice,
+  { position = 0n, count, ...rest }: Omit<FillRequest<"bool">, "dtype">,
+): Promise<Fill<Uint8Array>> {
+  const end = position + BigInt(count);
+  const wordStart = position & ~31n;
+  const words = Number((end - wordStart + 31n) >> 5n);
+  const { values } = await fill(device, {
+    ...rest,
+    position: wordStart,
+    count: words,
+    dtype: "u32",
+  });
+  const skip = Number(position - wordStart);
+  const out = new Uint8Array(count);
+  for (let i = 0; i < count; i++) out[i] = (values[(skip + i) >> 5] >>> ((skip + i) & 31)) & 1;
+  return { values: out, position: end };
+}
+
+function convert(bytes: ArrayBuffer, dtype: HostDType) {
   switch (dtype) {
     case "u8":
       return new Uint8Array(bytes);
@@ -200,6 +239,14 @@ function convert(bytes: ArrayBuffer, dtype: DType) {
       return new Uint32Array(bytes);
     case "u64":
       return new BigUint64Array(bytes);
+    case "i8":
+      return new Int8Array(bytes);
+    case "i16":
+      return new Int16Array(bytes);
+    case "i32":
+      return new Int32Array(bytes);
+    case "i64":
+      return new BigInt64Array(bytes);
     case "f32":
       return new Float32Array(bytes);
     case "f64":

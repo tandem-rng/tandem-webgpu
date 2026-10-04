@@ -19,4 +19,4 @@ export {
 } from "./core.ts";
 export type { Key, State } from "./core.ts";
 export { fill, fillBuffer, fillMany, requestDevice } from "./gpu.ts";
-export type { DType, Fill, FillOptions } from "./gpu.ts";
+export type { DType, Fill, FillOptions, HostDType } from "./gpu.ts";

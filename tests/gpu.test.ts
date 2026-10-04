@@ -1,6 +1,6 @@
 // The GPU fill against the Julia dumps and the spec vectors. Skipped without an adapter.
 import { assertEquals } from "jsr:@std/assert@1";
-import { fill, fillBuffer, fillMany, requestDevice, seed, toFloat32 } from "../src/mod.ts";
+import { fill, fillBuffer, fillMany, requestDevice, seed, Tandem, toFloat32 } from "../src/mod.ts";
 import vectors from "./vectors.json" with { type: "json" };
 
 const adapter = await navigator.gpu?.requestAdapter();
@@ -132,5 +132,45 @@ Deno.test(
       assertEquals(many[i].position, position);
     }
     assertEquals(many[3].buffer, own);
+  },
+);
+
+Deno.test(
+  { name: "signed integers are the dump bytes read two's complement", ...gpu },
+  async () => {
+    const u8 = await dump("seed42_K32_u8.bin");
+    const key = seed(42n), n = 100;
+    const bytes = u8.slice(0, 8 * n);
+    const want = {
+      i8: new Int8Array(bytes.buffer, 0, n),
+      i16: new Int16Array(bytes.buffer, 0, n),
+      i32: new Int32Array(bytes.buffer, 0, n),
+      i64: new BigInt64Array(bytes.buffer, 0, n),
+    };
+    for (const dtype of ["i8", "i16", "i32", "i64"] as const) {
+      const { values, position } = await fill(device!, { key, count: n, dtype });
+      assertEquals(values, want[dtype], dtype);
+      assertEquals(position, BigInt(want[dtype].BYTES_PER_ELEMENT * 8 * n));
+    }
+  },
+);
+
+Deno.test(
+  { name: "bool: spec vector bits and a mid-word start across blocks", ...gpu },
+  async () => {
+    for (const [i, x] of Object.entries(vectors.draws_from_position_0.Bool)) {
+      const { values } = await fill(device!, {
+        key: KEY,
+        position: BigInt(i),
+        count: 1,
+        dtype: "bool",
+      });
+      assertEquals(values[0], x);
+    }
+    const key = seed(42n), position = 37n, count = 500;
+    const { values, position: next } = await fill(device!, { key, position, count, dtype: "bool" });
+    const cpu = new Tandem(key, { position });
+    assertEquals(values, Uint8Array.from({ length: count }, () => cpu.nextBool() ? 1 : 0));
+    assertEquals(next, position + BigInt(count));
   },
 );
