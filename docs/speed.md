@@ -17,7 +17,7 @@ CPU: Apple M4 Pro, Node 26, 2^22 elements, best of five (`npm run bench:cpu`).
 | `fillF32` | 596 | 2.22 |
 | `fillF64` | 312 | 2.32 |
 | `fillU32Below`, range 1000 | 360 | 1.34 |
-| `fillNormalF64` | 28 | 0.21 |
+| `fillNormalF64` | 136 | 1.01 |
 | `fillNormalF32` | 36 | 0.13 |
 | `fillExponentialF64` | 33 | 0.25 |
 | `fillExponentialF32` | 67 | 0.25 |
@@ -28,14 +28,15 @@ costs about four times plain arithmetic. The notes below cover that and a WASM c
 
 Measured on the Apple M4 Pro with Node 26 at 2^22 elements, best of five.
 
-- Plain multiply and add in place of the emulated fma runs Float64 normals at 111 Melem/s,
-  Float64 exponentials at 157 and Float32 normals at 150, about four times the exact form. It
-  changes 4 % of the Float64 normals and 0.1 % of the Float64 exponentials, by up to 5.5e-16
-  relative, and none of the Float32 normals in 4M samples.
+- Plain multiply and add in place of the emulated fma runs Float64 exponentials at 157 Melem/s
+  and Float32 normals at 150, about four times the exact form. It changes 0.1 % of the Float64
+  exponentials, by up to 5.5e-16 relative, and none of the Float32 normals in 4M samples. The
+  Float64 normals take the logarithm only on the 0.43 % of draws that miss the ziggurat's
+  inner rectangles.
 - A WASM build of tandem-c (zig cc, wasm32-wasi, -O2 -msimd128, run under Node) fills 3700 Melem/s
-  of u32, 1240 of f64 and 1290 of bounded u32, about four times this package. Its normals and
-  exponentials run at 9.6 and 12.5 Melem/s, slower than here, since WASM has no fma and the
-  library call is slow. It is not part of this package.
+  of u32, 1240 of f64 and 1290 of bounded u32, about four times this package. Its exponentials
+  run at 12.5 Melem/s, slower than here, since WASM has no fma and the library call is slow. It
+  is not part of this package.
 - A 4-wide unrolled map from words to floats measured the same as the plain loop, and
   a 16-bit-limb `mulHi` is 1.8 times faster than a double product in the lane loop.
 - GPU exponentials (`fillExponential`, `exponential_f32`) deviate from the tandem-cuda fixtures by

@@ -22,7 +22,8 @@ const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" }
 - `fillCpu`: the options and result of `fill`, on the CPU.
 - `fill`, `fillBuffer`, `fillMany`: GPU fills of u8 to u64, i8 to i64, f32, f64 and bool.
 - `fillBelow`, `nextBelow`: bounded integers by Lemire's method, width chosen from the range.
-- `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller normals, exact with tandem-c on CPU.
+- `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller f32 and ziggurat f64 normals, exact
+  with tandem-c on CPU.
 - `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, same logarithm.
 - `seed`, `split`, `sub`, `fork`: keys and child generators.
 
@@ -91,8 +92,8 @@ Node, `npm run build` emits `dist/`.
 `chunkLength`. It gives every draw the shaders give, with the same values, on any runtime.
 Each fill takes a count and returns a new typed array, or takes a typed array, which may be a
 `subarray`, and fills it in place. Fills move the position past the draws they consume. An
-empty plain fill returns the aligned position, and an empty bounded, normal or exponential fill
-moves nothing.
+empty plain or Float64 normal fill returns the aligned position, and an empty bounded, Float32
+normal or exponential fill moves nothing.
 
 | Draw | Scalar | Fill | Array |
 |---|---|---|---|
@@ -102,7 +103,7 @@ moves nothing.
 | u64 | `nextU64` as BigInt, `nextU64Pair` as `[lo, hi]` | `fillU64` | `BigUint64Array`, whose bytes are the pairs |
 | f32, f64 | `nextF32`, `nextF64` | `fillF32`, `fillF64` | `Float32Array`, `Float64Array` |
 | bounded | `nextU32Below`, `nextU64Below`, `nextBelow` | `fillU32Below`, `fillU64Below`, `fillBelow` | `Uint32Array`, `BigUint64Array` |
-| normal | `nextNormalF32`, `nextNormalF64`, `nextNormal2F32`, `nextNormal2F64` | `fillNormalF32`, `fillNormalF64` | `Float32Array`, `Float64Array` |
+| normal | `nextNormalF32`, `nextNormalF64`, `nextNormal2F32` | `fillNormalF32`, `fillNormalF64` | `Float32Array`, `Float64Array` |
 | exponential | `nextExponentialF32`, `nextExponentialF64` | `fillExponentialF32`, `fillExponentialF64` | `Float32Array`, `Float64Array` |
 
 The bounded draws follow Appendix A. A scalar draw rejects on the draws that follow, and a fill
@@ -111,16 +112,24 @@ any element boundary equals the whole fill. `fillU32Below` and `fillU64Below` na
 width. `nextBelow` and `fillBelow` take it from the range, 32 bits up to 2^32 and 64 bits above,
 as Appendix A asks of an interface that names only the result type, so a bigint range of 1000
 gives the values of a `u32` fill in a `BigUint64Array`. A range of 0 gives 0, and a number range
-reaches 2^32. `nextNormal2F64` returns the pair of a Box-Muller step, and a normal fill is the
-flattened sequence of those pairs: an odd count writes the cosine half of its last pair and
-still consumes both uniforms. Exponentials are `-log(1 - u)` of one uniform each.
+reaches 2^32.
+
+Float64 normals are the 1024-layer ziggurat of Appendix A. Element `i` takes 64-bit draw `i`.
+A draw that misses the inner rectangles, 0.43 % of them, continues on a fallback generator keyed
+by its global draw index `g`, `split(g)` of `sub(0x4e524d3634)` of the key, and leaves the
+position alone. So a scalar draw consumes one draw, and a fill cut at any element equals the
+whole fill. `tools/gen_zig_tables.ts` writes the tables of `src/zig_tables.ts` from the spec's
+`tables/normal_f64_zig1024.json`. `nextNormal2F32` returns the pair of a Box-Muller step, and a
+Float32 normal fill is the flattened sequence of those pairs: an odd count writes the cosine half
+of its last pair and still consumes both uniforms. Exponentials are `-log(1 - u)` of one uniform
+each.
 
 Normals and exponentials copy the polynomials of tandem-c with the same operation order, and
 JavaScript has no fused multiply-add, so `fma64` and `fma32` emulate it exactly: Dekker's product
 and a two-term sum, with the one rounding tie the double sum can hit settled by its lost part.
 The values equal tandem-c bit for bit on every engine. The emulation costs about four times the
-speed of plain multiply and add. Plain arithmetic would change 4 % of the Float64 normals and
-0.1 % of the Float64 exponentials, by up to 5.5e-16 relative, so the exact form is the only one.
+speed of plain multiply and add. Plain arithmetic would change 0.1 % of the Float64
+exponentials, by up to 5.5e-16 relative, so the exact form is the only one.
 
 `fillCpu(options)` takes the options of `fill`, with `normal` also for `f64` and `exponential`
 for `f32` and `f64`, and returns `{ values, position }` synchronously. It covers every `dtype`
