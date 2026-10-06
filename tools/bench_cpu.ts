@@ -28,11 +28,11 @@ function boxMuller(z: Float32Array | Float64Array) {
   }
 }
 
-// Each row: the Tandem fill, then crypto.getRandomValues for raw words and a Math.random loop
-// for the rest, into an array of the same type.
+// Each row: the Tandem fill, then a Math.random loop into an array of the same type. Math.random
+// is the engine's noncryptographic generator, xorshift128+ in V8.
 const rows: [string, Uint32Array | Float32Array | Float64Array, () => void, () => void][] = [
   ["fillU32", u32, () => rng.fillU32(u32), () => {
-    for (let i = 0; i < N; i += 16384) crypto.getRandomValues(u32.subarray(i, i + 16384));
+    for (let i = 0; i < N; i++) u32[i] = Math.random() * 2 ** 32;
   }],
   ["fillF32", f32, () => rng.fillF32(f32), () => {
     for (let i = 0; i < N; i++) f32[i] = Math.random();
