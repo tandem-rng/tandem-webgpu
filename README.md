@@ -8,8 +8,9 @@
 
 [Tandem8x32](https://github.com/tandem-rng/spec) for JavaScript: a WGSL shader fills the stream
 on the GPU, and the same package runs every draw on the CPU for Node, Deno, Bun and browsers.
-The stream is bit exact with the specification. GPU normals agree with the CPU to 16 ulps
-plus 1e-6 and GPU exponentials to 8 ulps plus 1e-6, not exactly.
+The stream is bit exact with the specification. CPU exponentials and Float32 normals agree with
+tandem-c to 4 ulps, GPU normals with the CPU to 16 ulps plus 1e-6 and GPU exponentials to 8 ulps
+plus 1e-6.
 
 The git install builds `dist/` through `prepare`. In a clone, Deno, Bun and Node 24 or later
 import `src/mod.ts` directly. The GPU path needs WebGPU.

@@ -124,12 +124,13 @@ Float32 normal fill is the flattened sequence of those pairs: an odd count write
 of its last pair and still consumes both uniforms. Exponentials are `-log(1 - u)` of one uniform
 each.
 
-Normals and exponentials copy the polynomials of tandem-c with the same operation order, and
-JavaScript has no fused multiply-add, so `fma64` and `fma32` emulate it exactly: Dekker's product
-and a two-term sum, with the one rounding tie the double sum can hit settled by its lost part.
-The values equal tandem-c bit for bit on every engine. The emulation costs about four times the
-speed of plain multiply and add. Plain arithmetic would change 0.1 % of the Float64
-exponentials, by up to 5.5e-16 relative, so the exact form is the only one.
+Normals and exponentials copy the polynomials of tandem-c with the same operation order.
+JavaScript has no fused multiply-add. The slow path of the Float64 ziggurat emulates it exactly
+with `fma64`, Dekker's product and a two-term sum, so the Float64 normals equal tandem-c bit for
+bit on every engine. That path runs for 0.43 % of the draws. The Float32 normals and both
+exponentials round the plain multiply-add instead, since the exact emulation costs four times
+the speed there. They agree with tandem-c within 4 ulps, the tolerance of Appendix A, and the
+Float32 normals equal it except where a double sum ties between two Float32 values.
 
 `fillCpu(options)` takes the options of `fill`, with `normal` also for `f64` and `exponential`
 for `f32` and `f64`, and returns `{ values, position }` synchronously. It covers every `dtype`

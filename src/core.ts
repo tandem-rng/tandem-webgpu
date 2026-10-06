@@ -552,8 +552,7 @@ export class Tandem {
   }
   /**
    * A standard normal pair from two Float32 uniform draws by Box-Muller, cosine half first, in
-   * single precision with the polynomial arithmetic of tandem-c, which makes the values equal
-   * to its bit for bit.
+   * single precision with the polynomials of tandem-c, within 4 ulps of its values.
    */
   nextNormal2F32(): [number, number] {
     pairF[0] = this.nextF32();
@@ -600,8 +599,8 @@ export class Tandem {
     return out;
   }
 
-  /** Standard exponentials -ln(1 - u) of one uniform each, with the same polynomial logarithm,
-   * so they equal tandem-c bit for bit. A fill consumes one draw per element. */
+  /** Standard exponentials -ln(1 - u) of one uniform each, with the polynomial logarithm of
+   * tandem-c, within 4 ulps of its values. A fill consumes one draw per element. */
   nextExponentialF64(): number {
     pair[0] = this.nextF64();
     exponential64(pair, 1);

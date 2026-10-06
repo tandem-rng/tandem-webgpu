@@ -1,15 +1,17 @@
 // Normals and exponentials on the CPU with the arithmetic of tandem-c: the Float64 ziggurat
-// with the spec's tables, a short polynomial logarithm, Taylor series for cos and sin, and an
-// explicit fused multiply-add at every multiply-add. JavaScript has no fma, so `fma64` and
-// `fma32` emulate it exactly, which makes the values equal tandem-c bit for bit on any engine.
+// with the spec's tables, a short polynomial logarithm, Taylor series for cos and sin, and a
+// multiply-add at every place tandem-c fuses one. JavaScript has no fma. The slow path of the
+// Float64 ziggurat emulates it exactly, `fma64`, so the Float64 normals equal tandem-c bit for
+// bit on any engine. The Float32 normals and both exponentials round the plain sum, which is
+// four times faster and agrees with tandem-c within the ulp tolerance of Appendix A.
 import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
 const U32 = new Uint32Array(F64.buffer);
 const F32 = new Float32Array(1);
 const I32 = new Uint32Array(F32.buffer);
-// Word indices of the low and high half of a double. The engines are little-endian.
-const LO = 0, HI = 1;
+// The word index of the high half of a double. The engines are little-endian.
+const HI = 1;
 
 const SPLIT = 134217729; // 2^27 + 1, Veltkamp's splitter
 
@@ -64,23 +66,9 @@ export function horner64(w: number, c: Float64Array): number {
   return acc;
 }
 
-/** The Float32 fused multiply-add on Float32 values held in doubles. The product is exact in a
- * double, so the sum rounds twice, to double and to Float32. That is wrong only when the double
- * sum is exactly halfway between two Float32 values, which its low mantissa bits show, and its
- * own lost part then settles the tie. */
-export function fma32(a: number, b: number, c: number): number {
-  const p = a * b, s = p + c;
-  F64[0] = s;
-  const lo = U32[LO];
-  if ((lo & 0x1fffffff) === 0x10000000) {
-    const bb = s - c, e = (c - (s - bb)) + (p - bb);
-    if (e !== 0) {
-      U32[LO] = (e > 0) === (s > 0) ? lo + 1 : lo - 1;
-      return Math.fround(F64[0]);
-    }
-  }
-  return Math.fround(s);
-}
+/** The Float32 multiply-add of Float32 values held in doubles. The product is exact, so this
+ * is the fused result unless the double sum lies exactly halfway between two Float32 values. */
+const fma32 = (a: number, b: number, c: number) => Math.fround(a * b + c);
 
 export const LOG_POLY = Float64Array.of(
   0.08312363319426472,
@@ -97,22 +85,35 @@ const LN2_HI_H = SPLIT * LN2_HI - (SPLIT * LN2_HI - LN2_HI), LN2_HI_L = LN2_HI -
 const LN2_LO_H = SPLIT * LN2_LO - (SPLIT * LN2_LO - LN2_LO), LN2_LO_L = LN2_LO - LN2_LO_H;
 
 /** -2 ln x for x in (0, 1]: x = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits, then
- * 2 k ln 2 - 4 s p(s^2) with s = (mant - 1) / (mant + 1). */
-export function neg2Log64(x: number): number {
+ * 2 k ln 2 - 4 s p(s^2) with s = (mant - 1) / (mant + 1). With `exact`, every multiply-add rounds
+ * once as in tandem-c. Without, each rounds twice, within 1e-15 relative of the exact form. */
+export function neg2Log64(x: number, exact: boolean): number {
   F64[0] = x;
   const ix = U32[HI] + 0x00095f62;
   const nk = 1023 - (ix >>> 20);
   U32[HI] = (ix & 0xfffff) + 0x3fe6a09e;
   const mant = F64[0];
-  const s = (mant - 1) / (mant + 1), p = horner64(s * s, LOG_POLY);
-  return fmaw(LN2_LO, LN2_LO_H, LN2_LO_L, nk, fmaw(LN2_HI, LN2_HI_H, LN2_HI_L, nk, (s * -4.0) * p));
+  const s = (mant - 1) / (mant + 1), w = s * s;
+  if (exact) {
+    const p = horner64(w, LOG_POLY);
+    return fmaw(
+      LN2_LO,
+      LN2_LO_H,
+      LN2_LO_L,
+      nk,
+      fmaw(LN2_HI, LN2_HI_H, LN2_HI_L, nk, (s * -4.0) * p),
+    );
+  }
+  let p = LOG_POLY[0];
+  for (let k = 1; k < LOG_POLY.length; k++) p = p * w + LOG_POLY[k];
+  return LN2_LO * nk + (LN2_HI * nk + (s * -4.0) * p);
 }
 
 const fr = Math.fround;
 const LOG_POLY32 = Float32Array.of(0.14275366, 0.20000061, 0.33333334, 1);
 const L32_HI = fr(1.38629150390625), L32_LO = fr(2.857213530660374e-06);
 
-/** The Float32 polynomial c[0] w^(n-1) + ... + c[n-1] by fused steps, on Float32 values. */
+/** The Float32 polynomial c[0] w^(n-1) + ... + c[n-1] by Horner steps, on Float32 values. */
 export function horner32(w: number, c: Float32Array): number {
   let acc = c[0];
   for (let k = 1; k < c.length; k++) acc = fma32(w, acc, c[k]);
@@ -164,13 +165,13 @@ export function zigSlow(lo: number, hi: number, f: Draws64): number {
       // The tail beyond R, by Marsaglia's method.
       let a: number, b: number;
       do {
-        a = 0.5 * neg2Log64(1 - uniform(f)) / ZIG_R;
-        b = 0.5 * neg2Log64(1 - uniform(f));
+        a = 0.5 * neg2Log64(1 - uniform(f), true) / ZIG_R;
+        b = 0.5 * neg2Log64(1 - uniform(f), true);
       } while (b + b < a * a);
       return lo & 1024 ? -(ZIG_R + a) : ZIG_R + a;
     }
     const y = ZIG_Y[i] + uniform(f) * (ZIG_Y[i + 1] - ZIG_Y[i]);
-    if (-0.5 * neg2Log64(y) < -0.5 * (x * x)) return x;
+    if (-0.5 * neg2Log64(y, true) < -0.5 * (x * x)) return x;
     f.next();
     lo = f.lo;
     hi = f.hi;
@@ -214,7 +215,7 @@ export function normalPairs32(z: Float32Array, m: number): void {
 
 /** In place, z[j] = -ln(1 - z[j]) for uniforms z[j]. Halving -2 ln is exact. */
 export function exponential64(z: Float64Array, m: number): void {
-  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j]);
+  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j], false);
 }
 
 export function exponential32(z: Float32Array, m: number): void {

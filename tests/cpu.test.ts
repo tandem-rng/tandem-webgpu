@@ -1,7 +1,7 @@
 // The CPU path: scalar draws, fills, normals and exponentials against the reference ports.
 import { createHash } from "node:crypto";
 import { align, block, fillCpu, seed, Tandem } from "../src/mod.ts";
-import { fma32, fma64, horner64, LOG_POLY } from "../src/derived.ts";
+import { fma64, horner64, LOG_POLY, neg2Log64 } from "../src/derived.ts";
 import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
 import { assertEquals, assertThrows, test } from "./harness.ts";
@@ -13,32 +13,42 @@ const bytes = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a.b
 type CExp<T> = [string, T[], string]; // start, 64 values, end position
 type DeviceExp = [string, number, number[]]; // start, n, 64 values
 
-test("exponentials equal tandem-c bit for bit, scalar draws and fills", () => {
+// The exponentials and the Float32 normals round each multiply-add twice where tandem-c fuses
+// it. The bounds are the ulp tolerance of Appendix A.
+const near64 = (got: number, want: number) => Math.abs(got - want) <= 4 * 2 ** -52 * Math.abs(want);
+const near32 = (got: number, want: number) =>
+  Math.abs(got - Math.fround(want)) <= 4 * 2 ** -23 * Math.abs(want) + 1e-6;
+const allNear = (near: (a: number, b: number) => boolean, got: ArrayLike<number>, want: number[]) =>
+  want.every((w, i) => near(got[i], w));
+
+test("exponentials agree with tandem-c within 4 ulps, scalar draws equal the fills", () => {
   for (const [start, want, end] of cross.CROSS_EXPONENTIAL as unknown as CExp<number>[]) {
     const fill = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(fill.fillExponentialF64(want.length), Float64Array.from(want), `f64 ${start}`);
+    const got = fill.fillExponentialF64(want.length);
+    assertEquals(allNear(near64, got, want), true, `f64 ${start}`);
     assertEquals(fill.position, BigInt(end));
     const one = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(want.map(() => one.nextExponentialF64()), want);
+    assertEquals(Float64Array.from(want, () => one.nextExponentialF64()), got);
     assertEquals(one.position, BigInt(end));
   }
   for (const [start, want, end] of cross.CROSS_EXPONENTIALF as unknown as CExp<number>[]) {
     const fill = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(fill.fillExponentialF32(want.length), Float32Array.from(want), `f32 ${start}`);
+    const got = fill.fillExponentialF32(want.length);
+    assertEquals(allNear(near32, got, want), true, `f32 ${start}`);
     assertEquals(fill.position, BigInt(end));
     const one = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(want.map(() => one.nextExponentialF32()), want.map(Math.fround));
+    assertEquals(Float32Array.from(want, () => one.nextExponentialF32()), got);
   }
 });
 
-test("exponentials equal tandem-cuda fills bit for bit", () => {
+test("exponentials agree with tandem-cuda fills within 4 ulps", () => {
   for (const [pos, n, want] of cross.CROSS_EXP64 as unknown as DeviceExp[]) {
     const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillExponentialF64(n);
-    assertEquals(got, Float64Array.from(want.slice(0, n)), `f64 from ${pos}`);
+    assertEquals(allNear(near64, got, want.slice(0, n)), true, `f64 from ${pos}`);
   }
   for (const [pos, n, want] of cross.CROSS_EXP32 as unknown as DeviceExp[]) {
     const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillExponentialF32(n);
-    assertEquals(got, Float32Array.from(want.slice(0, n)), `f32 from ${pos}`);
+    assertEquals(allNear(near32, got, want.slice(0, n)), true, `f32 from ${pos}`);
   }
 });
 
@@ -60,34 +70,29 @@ test("1e6 Float64 normals at five starts hash to the tandem-c dump", () => {
   );
 });
 
-test("2e6 - 1 Float32 normals at five starts hash to the FNV-1a of tandem-c", () => {
-  // FNV-1a 64 in 32-bit halves, since a BigInt product per byte is slow: the prime is
-  // 2^40 + 435, and every partial sum stays below 2^53.
-  let lo = 0x84222325, hi = 0xcbf29ce4;
+test("1e6 exponentials and Float32 normals at five starts stay near the exact forms", () => {
+  // f64: against the fused arithmetic of tandem-c on the same uniforms. f32: against libm, in
+  // double. The bounds sit a little above the worst deviations measured.
+  let e64 = 0, e32 = 0, n32 = 0;
   for (const position of HASH_STARTS) {
-    const b = bytes(new Tandem(HASH_KEY, { position }).fillNormalF32(2 * N - 1));
-    for (let i = 0; i < b.length; i++) {
-      lo = (lo ^ b[i]) >>> 0;
-      const p = lo * 435;
-      hi = (hi * 435 + Math.floor(p / 2 ** 32) + ((lo << 8) >>> 0)) >>> 0;
-      lo = p >>> 0;
+    const u64 = new Tandem(HASH_KEY, { position }).fillF64(N);
+    const x64 = new Tandem(HASH_KEY, { position }).fillExponentialF64(N);
+    for (let i = 0; i < N; i++) {
+      const want = 0.5 * neg2Log64(1 - u64[i], true);
+      e64 = Math.max(e64, Math.abs(x64[i] - want) / (2 ** -52 * want));
+    }
+    const u32 = new Tandem(HASH_KEY, { position }).fillF32(2 * N);
+    const x32 = new Tandem(HASH_KEY, { position }).fillExponentialF32(2 * N);
+    const z32 = new Tandem(HASH_KEY, { position }).fillNormalF32(2 * N);
+    for (let i = 0; i < 2 * N; i++) {
+      const want = -Math.log1p(-u32[i]);
+      e32 = Math.max(e32, Math.abs(x32[i] - want) / (2 ** -23 * want));
+      const j = i & ~1, r = Math.sqrt(-2 * Math.log1p(-u32[j])), b = 2 * Math.PI * u32[j + 1];
+      n32 = Math.max(n32, Math.abs(z32[i] - (i & 1 ? r * Math.sin(b) : r * Math.cos(b))));
     }
   }
-  const hex = (x: number) => x.toString(16).padStart(8, "0");
-  assertEquals(hex(hi) + hex(lo), "aa1ea656ce73a4fb");
-});
-
-test("1e6 exponentials at five starts hash to the tandem-c dump", () => {
-  const hash = createHash("sha256");
-  for (const position of HASH_STARTS) {
-    const g = new Tandem(HASH_KEY, { position });
-    hash.update(bytes(g.fillExponentialF64(N)));
-    hash.update(bytes(g.fillExponentialF32(N)));
-  }
-  assertEquals(
-    hash.digest("hex"),
-    "5c035a4ef1368231d25a9c2f9201be2df3224e28a14549a50625d0db3770ef4e",
-  );
+  console.log(`worst: exponential f64 ${e64} ulps, f32 ${e32} ulps, normal f32 ${n32}`);
+  assertEquals(e64 < 4 && e32 < 3 && n32 < 1e-6, true);
 });
 
 // erfc with fractional error under 1.2e-7 (Numerical Recipes' erfcc), far below the KS bound.
@@ -193,7 +198,7 @@ test("the emulated fused multiply-adds are correctly rounded on hard cases", () 
     const keep = 1 + Math.floor(rand() * bits), m = Math.floor(rand() * 2 ** keep);
     return (rand() < 0.5 ? -1 : 1) * (m + 1) * 2 ** (Math.floor(rand() * 40) - 20);
   };
-  for (const [bits, fma, r] of [[53, fma64, (x: number) => x], [24, fma32, Math.fround]] as const) {
+  for (const [bits, fma, r] of [[53, fma64, (x: number) => x]] as const) {
     for (let i = 0; i < 40000; i++) {
       const a = r(scaled(bits)), b = r(scaled(bits)), p = a * b;
       // An unrelated addend, one that cancels the rounded product, and one that leaves a
@@ -205,17 +210,6 @@ test("the emulated fused multiply-adds are correctly rounded on hard cases", () 
         ? r(-r(p))
         : r(-r(p) + (rand() - 0.5) * Math.abs(p) * 2 ** -(bits + k));
       assertEquals(fma(a, b, c), exactFma(a, b, c, bits), `${bits} bits: ${a} ${b} ${c}`);
-    }
-  }
-});
-
-test("the Float32 fma settles an exact halfway sum by the sign of the lost part", () => {
-  // The product of 1 + m 2^-12 with itself has 25 bits, the last one a midpoint of Float32
-  // values, and a far smaller addend is lost in the double sum.
-  for (const m of [1, 3, 5, 7]) {
-    const a = 1 + m * 2 ** -12;
-    for (const c of [2 ** -60, -(2 ** -60), 2 ** -70, -(2 ** -70)]) {
-      assertEquals(fma32(a, a, c), exactFma(a, a, c, 24), `${a} ${c}`);
     }
   }
 });

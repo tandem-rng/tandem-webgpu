@@ -19,7 +19,7 @@ later import `src/mod.ts` directly. The GPU path needs WebGPU. No dependencies.
 
 The stream is bit exact with the specification, and the CPU and GPU return the same values,
 except GPU normals, which agree to 16 ulps plus 1e-6, and GPU exponentials, which agree to
-8 ulps plus 1e-6.
+8 ulps plus 1e-6. CPU exponentials and Float32 normals agree with tandem-c to 4 ulps.
 
 ## AI assistance
 
