@@ -133,6 +133,13 @@ export function checkK(K: number): void {
   }
 }
 
+/** Throw unless a generator may start at `position`: 0 <= position < 2^63, section 5. */
+export function checkStart(position: bigint): void {
+  if (position < 0n || position >= 1n << 63n) {
+    throw new RangeError("position must be in [0, 2^63)");
+  }
+}
+
 const POSITION_LIMIT = 1n << 64n;
 const LAST_ROW = POSITION_LIMIT - 1024n;
 // Purposes reserved for the fallback generators of bounded fills (Appendix A).
@@ -225,7 +232,7 @@ export class Tandem {
 
   constructor(key: Key, { position = 0n, K = DEFAULT_K }: { position?: bigint; K?: number } = {}) {
     checkK(K);
-    if (position < 0n || position >= POSITION_LIMIT) throw new RangeError("position out of range");
+    checkStart(position);
     this.#key = [key[0], key[1], key[2], key[3]];
     this.#K = K;
     this.#setPosition(position);

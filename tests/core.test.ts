@@ -13,7 +13,7 @@ import {
   toFloat32,
   toFloat64,
 } from "../src/mod.ts";
-import { assertEquals, assertThrows, dump, test } from "./harness.ts";
+import { assertEquals, dump, test } from "./harness.ts";
 import vectors from "./vectors.json" with { type: "json" };
 
 const DOMAIN_STREAM = 0x9e3779b9, AUX_STREAM = 0x94d049bb;
@@ -97,19 +97,6 @@ test("Tandem draws from position 0 match the spec vectors", () => {
   assertEquals(g.position, 129n);
 });
 
-test("Tandem fills equal the Julia dumps at K = 32 and K = 8", async () => {
-  const u32 = new Uint32Array((await dump("k1234_K32_u32.bin")).buffer);
-  assertEquals(new Tandem(K1234).fillU32(u32.length), u32);
-  const k8 = new Uint32Array((await dump("k1234_K8_u32.bin")).buffer);
-  assertEquals(new Tandem(K1234, { K: 8 }).fillU32(k8.length), k8);
-  const u64 = new BigUint64Array((await dump("k1234_K32_u64.bin")).buffer);
-  assertEquals(new Tandem(K1234).fillU64(u64.length), u64);
-  const f32 = new Float32Array((await dump("seed42_K32_f32.bin")).buffer);
-  assertEquals(Tandem.seed(42n).fillF32(f32.length), f32);
-  const f64 = new Float64Array((await dump("seed42_K32_f64.bin")).buffer);
-  assertEquals(Tandem.seed(42n).fillF64(f64.length), f64);
-});
-
 test("Tandem scalar draws interleave widths with alignment", async () => {
   const u8 = new Uint8Array(await dump("seed42_K32_u8.bin"));
   const g = Tandem.seed(42n);
@@ -155,81 +142,6 @@ test("Tandem derived generators match the spec vectors", () => {
   );
 });
 
-test("Tandem enforces the 2^64 position bound", () => {
-  const g = new Tandem(KEY, { position: (1n << 64n) - 32n });
-  assertThrows(() => g.nextU32(), RangeError);
-  assertEquals(g.fillU32(0).length, 0);
-});
-
-// Fixtures of tandem-c and tandem-cuda (tools/gen_cross.ts). Structs are positional arrays and
-// 64-bit integers are decimal strings.
-import cross from "./cross.json" with { type: "json" };
-
-type Below = [string, string[], string]; // range, 64 values, end position
-type DeviceBelow = [string, number, string[]]; // range, rejected count, 64 values
-type CFill = [string, string, string[], string]; // start position, range, 64 values, end position
-type DeviceNormal = [string, number, number[]]; // start position, n, 64 values
-const FIXTURE_KEY = cross.CROSS_FILL_KEY as [number, number, number, number];
-
-test("scalar bounded draws match tandem-c, positions included", () => {
-  for (const [range, want, end] of cross.CROSS_U32 as unknown as Below[]) {
-    const g = Tandem.seed(42n);
-    g.nextBool();
-    assertEquals(want.map(() => g.nextU32Below(Number(range))), want.map(Number));
-    assertEquals(g.position, BigInt(end), `u32 range ${range}`);
-  }
-  for (const [range, want, end] of cross.CROSS_U64 as unknown as Below[]) {
-    const g = Tandem.seed(42n);
-    g.nextBool();
-    assertEquals(want.map(() => g.nextU64Below(BigInt(range))), want.map(BigInt));
-    assertEquals(g.position, BigInt(end), `u64 range ${range}`);
-  }
-});
-
-test("bounded fills from position 0 match tandem-cuda, rejections included", () => {
-  let rejected = 0;
-  for (const [range, rej, want] of cross.CROSS_BELOW32 as unknown as DeviceBelow[]) {
-    assertEquals(
-      new Tandem(FIXTURE_KEY).fillU32Below(64, Number(range)),
-      Uint32Array.from(want, Number),
-    );
-    rejected += rej;
-  }
-  for (const [range, rej, want] of cross.CROSS_BELOW64 as unknown as DeviceBelow[]) {
-    assertEquals(
-      new Tandem(FIXTURE_KEY).fillU64Below(64, BigInt(range)),
-      BigUint64Array.from(want, BigInt),
-    );
-    rejected += rej;
-  }
-  assertEquals(rejected > 0, true);
-});
-
-test("bounded fills from positions 1 and 12345 match tandem-c", () => {
-  for (const [start, range, want, end] of cross.CROSS_FILL_U32 as unknown as CFill[]) {
-    const g = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(g.fillU32Below(64, Number(range)), Uint32Array.from(want, Number));
-    assertEquals(g.position, BigInt(end), `u32 from ${start} range ${range}`);
-  }
-  for (const [start, range, want, end] of cross.CROSS_FILL_U64 as unknown as CFill[]) {
-    const g = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(g.fillU64Below(64, BigInt(range)), BigUint64Array.from(want, BigInt));
-    assertEquals(g.position, BigInt(end), `u64 from ${start} range ${range}`);
-  }
-});
-
-test("bounded range 0 gives 0 and consumes a draw, an empty fill moves nothing", () => {
-  const g = Tandem.seed(5n);
-  assertEquals(g.fillU32Below(3, 0), new Uint32Array(3));
-  assertEquals(g.position, 96n);
-  assertEquals(g.nextU64Below(0n), 0n);
-  assertEquals(g.position, 192n);
-  const h = new Tandem(KEY, { position: 5n });
-  h.fillU32Below(0, 7);
-  h.fillU64Below(0, 7n);
-  assertEquals(h.position, 5n);
-});
-
 /** Draws of the plain fill that Lemire rejects, so a test knows the fallback ran. */
 function rejections(raw: ArrayLike<number | bigint>, range: bigint, bits: bigint): number {
   const t = ((1n << bits) - range) % range;
@@ -259,45 +171,4 @@ test("a bounded fill cut at any boundary equals the whole fill", () => {
       assertEquals(p64a.fillU64Below(b - a, u64), whole64.subarray(a, b), `u64 K=${K} [${a},${b})`);
     }
   }
-});
-
-type CNormal = [string, number[], string]; // start position, 64 values, end position
-
-test("normals equal tandem-c bit for bit, every ziggurat path included", () => {
-  // The last rows hold a wedge accept, a wedge reject and a tail draw at element 20.
-  for (const [start, want, end] of cross.CROSS_NORMAL as unknown as CNormal[]) {
-    const fill = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(fill.fillNormalF64(want.length), Float64Array.from(want), `f64 from ${start}`);
-    assertEquals(fill.position, BigInt(end));
-    const one = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(want.map(() => one.nextNormalF64()), want);
-    assertEquals(one.position, BigInt(end));
-  }
-  const f32 = new Tandem(seed(42n));
-  f32.nextBool();
-  const want32 = Float32Array.from(cross.CROSS_NORMALF as number[]);
-  assertEquals(f32.fillNormalF32(want32.length), want32);
-  assertEquals(f32.position, BigInt(cross.CROSS_NORMALF_END_POS));
-});
-
-test("normals equal tandem-cuda fills bit for bit at several positions, odd counts included", () => {
-  for (const [pos, n, want] of cross.CROSS_NORMAL64 as unknown as DeviceNormal[]) {
-    const g = new Tandem(FIXTURE_KEY, { position: BigInt(pos) });
-    assertEquals(g.fillNormalF64(n), Float64Array.from(want.slice(0, n)), `f64 from ${pos}`);
-    assertEquals(g.position, align(BigInt(pos), 64) + 64n * BigInt(n));
-  }
-  for (const [pos, n, want] of cross.CROSS_NORMAL32 as unknown as DeviceNormal[]) {
-    const g = new Tandem(FIXTURE_KEY, { position: BigInt(pos) });
-    assertEquals(g.fillNormalF32(n), Float32Array.from(want.slice(0, n)), `f32 from ${pos}`);
-    assertEquals(g.position, align(BigInt(pos), 32) + 32n * BigInt(n + (n % 2)));
-  }
-});
-
-test("a scalar f64 normal takes one draw, an f32 normal the two draws of its pair", () => {
-  const g = Tandem.seed(8n), h = Tandem.seed(8n);
-  assertEquals(g.nextNormalF64(), h.fillNormalF64(1)[0]);
-  assertEquals(g.position, 64n);
-  assertEquals(g.nextNormalF32(), h.fillNormalF32(2)[0]);
-  assertEquals(g.position, 128n);
-  assertEquals(new Tandem(KEY, { position: 5n }).fillNormalF32(0).length, 0);
 });

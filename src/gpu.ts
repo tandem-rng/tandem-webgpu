@@ -1,7 +1,7 @@
 // The WebGPU fill: stream words in row order from an aligned bit position.
 
 import type { ChoiceTable } from "./choice.ts";
-import { align, checkK, DEFAULT_K, type Key, mapF64 } from "./core.ts";
+import { align, checkK, checkStart, DEFAULT_K, type Key, mapF64 } from "./core.ts";
 import { SHADER } from "./shader.ts";
 
 export type DType = "u8" | "u16" | "u32" | "u64" | "f32" | "f64";
@@ -154,6 +154,7 @@ function plan(
   }: FillOptions,
 ): { placed: Placed; jobs: Job[] } {
   checkK(K);
+  checkStart(position);
   if (choice && (dtype !== "u32" || floats || range !== undefined || normal || exponential)) {
     throw new RangeError("choice applies to dtype u32 only, without range, normal or exponential");
   }

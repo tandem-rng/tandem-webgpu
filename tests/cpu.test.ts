@@ -1,89 +1,33 @@
-// The CPU path: scalar draws, fills, normals and exponentials against the reference ports.
-import { createHash } from "node:crypto";
-import { align, block, fillCpu, seed, Tandem } from "../src/mod.ts";
+// The CPU path: scalar draws, fills, normals and exponentials beyond the conformance cases.
+import { align, block, ChoiceTable, fillCpu, seed, Tandem } from "../src/mod.ts";
 import { fma64, horner64, LOG_POLY, neg2Log64 } from "../src/derived.ts";
 import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
-import { assertEquals, assertThrows, test } from "./harness.ts";
-import cross from "./cross.json" with { type: "json" };
+import { fnv1a, hashes, keyOf } from "./fixtures.ts";
+import { assertEquals, test } from "./harness.ts";
 
-const FIXTURE_KEY = cross.CROSS_FILL_KEY as [number, number, number, number];
-const bytes = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-
-type CExp<T> = [string, T[], string]; // start, 64 values, end position
-type DeviceExp = [string, number, number[]]; // start, n, 64 values
-
-// The exponentials and the Float32 normals round each multiply-add twice where tandem-c fuses
-// it. The bounds are the ulp tolerance of Appendix A.
-const near64 = (got: number, want: number) => Math.abs(got - want) <= 4 * 2 ** -52 * Math.abs(want);
-const near32 = (got: number, want: number) =>
-  Math.abs(got - Math.fround(want)) <= 4 * 2 ** -23 * Math.abs(want) + 1e-6;
-const allNear = (near: (a: number, b: number) => boolean, got: ArrayLike<number>, want: number[]) =>
-  want.every((w, i) => near(got[i], w));
-
-test("exponentials agree with tandem-c within 4 ulps, scalar draws equal the fills", () => {
-  for (const [start, want, end] of cross.CROSS_EXPONENTIAL as unknown as CExp<number>[]) {
-    const fill = new Tandem(seed(42n), { position: BigInt(start) });
-    const got = fill.fillExponentialF64(want.length);
-    assertEquals(allNear(near64, got, want), true, `f64 ${start}`);
-    assertEquals(fill.position, BigInt(end));
-    const one = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(Float64Array.from(want, () => one.nextExponentialF64()), got);
-    assertEquals(one.position, BigInt(end));
-  }
-  for (const [start, want, end] of cross.CROSS_EXPONENTIALF as unknown as CExp<number>[]) {
-    const fill = new Tandem(seed(42n), { position: BigInt(start) });
-    const got = fill.fillExponentialF32(want.length);
-    assertEquals(allNear(near32, got, want), true, `f32 ${start}`);
-    assertEquals(fill.position, BigInt(end));
-    const one = new Tandem(seed(42n), { position: BigInt(start) });
-    assertEquals(Float32Array.from(want, () => one.nextExponentialF32()), got);
-  }
-});
-
-test("exponentials agree with tandem-cuda fills within 4 ulps", () => {
-  for (const [pos, n, want] of cross.CROSS_EXP64 as unknown as DeviceExp[]) {
-    const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillExponentialF64(n);
-    assertEquals(allNear(near64, got, want.slice(0, n)), true, `f64 from ${pos}`);
-  }
-  for (const [pos, n, want] of cross.CROSS_EXP32 as unknown as DeviceExp[]) {
-    const got = new Tandem(FIXTURE_KEY, { position: BigInt(pos) }).fillExponentialF32(n);
-    assertEquals(allNear(near32, got, want.slice(0, n)), true, `f32 from ${pos}`);
-  }
-});
-
-// The hashes of tandem-c's tools/dump_normals.c, tests/test_normal_bits.c and
-// tools/dump_exponentials.c: fills from each of five start positions, seed 2026 + 7 2^64, so
-// the hashes cover the slow path of the ziggurat and the whole polynomial range.
-const HASH_KEY = seed(2026n + (7n << 64n));
-const HASH_STARTS = [0n, 1n, 77n, 12345n, 1n << 30n];
-const N = 1_000_000;
-
-test("1e6 Float64 normals at five starts hash to the tandem-c dump", () => {
-  const hash = createHash("sha256");
-  for (const position of HASH_STARTS) {
-    hash.update(bytes(new Tandem(HASH_KEY, { position }).fillNormalF64(N)));
-  }
-  assertEquals(
-    hash.digest("hex"),
-    "700ec4d2f4d6b82aaa56c6eff18a4e5919585fdbd093988773383d580ea610d1",
-  );
-});
+// The dump of tandem-c's tools/dump_exponentials.c: from each of five starts, Float64 then
+// Float32 exponential fills on one generator, which cover the whole polynomial range.
+const EXP_DUMP = hashes.dumps.find((d) => d.id === "tools/dump_exponentials.c")!;
+const TABLE = new ChoiceTable([1, 2, 3, 4]);
 
 test("1e6 exponentials and Float32 normals at five starts stay near the exact forms", () => {
-  // f64: against the fused arithmetic of tandem-c on the same uniforms. f32: against libm, in
-  // double. The bounds sit a little above the worst deviations measured.
+  // f64: against the fused arithmetic of tandem-c on the same uniforms, which hashes to the
+  // dump. f32: against libm, in double. The bounds sit a little above the worst deviations
+  // measured.
+  const key = keyOf(EXP_DUMP.key), N = EXP_DUMP.draws[0].n, dumped: ArrayBufferView[] = [];
   let e64 = 0, e32 = 0, n32 = 0;
-  for (const position of HASH_STARTS) {
-    const u64 = new Tandem(HASH_KEY, { position }).fillF64(N);
-    const x64 = new Tandem(HASH_KEY, { position }).fillExponentialF64(N);
+  for (const start of EXP_DUMP.starts) {
+    const position = BigInt(start), g = new Tandem(key, { position });
+    const exact = g.fillF64(N).map((u) => 0.5 * neg2Log64(1 - u, true));
+    const x64 = new Tandem(key, { position }).fillExponentialF64(N);
     for (let i = 0; i < N; i++) {
-      const want = 0.5 * neg2Log64(1 - u64[i], true);
-      e64 = Math.max(e64, Math.abs(x64[i] - want) / (2 ** -52 * want));
+      e64 = Math.max(e64, Math.abs(x64[i] - exact[i]) / (2 ** -52 * exact[i]));
     }
-    const u32 = new Tandem(HASH_KEY, { position }).fillF32(2 * N);
-    const x32 = new Tandem(HASH_KEY, { position }).fillExponentialF32(2 * N);
-    const z32 = new Tandem(HASH_KEY, { position }).fillNormalF32(2 * N);
+    dumped.push(exact, g.fillExponentialF32(N));
+    const u32 = new Tandem(key, { position }).fillF32(2 * N);
+    const x32 = new Tandem(key, { position }).fillExponentialF32(2 * N);
+    const z32 = new Tandem(key, { position }).fillNormalF32(2 * N);
     for (let i = 0; i < 2 * N; i++) {
       const want = -Math.log1p(-u32[i]);
       e32 = Math.max(e32, Math.abs(x32[i] - want) / (2 ** -23 * want));
@@ -93,6 +37,7 @@ test("1e6 exponentials and Float32 normals at five starts stay near the exact fo
   }
   console.log(`worst: exponential f64 ${e64} ulps, f32 ${e32} ulps, normal f32 ${n32}`);
   assertEquals(e64 < 4 && e32 < 3 && n32 < 1e-6, true);
+  assertEquals(fnv1a(dumped), EXP_DUMP.fnv1a);
 });
 
 // erfc with fractional error under 1.2e-7 (Numerical Recipes' erfcc), far below the KS bound.
@@ -301,6 +246,11 @@ test("fills into a caller array equal the allocating fills and touch nothing els
       (g: Tandem, o: Uint32Array) => g.fillU32Below(o, 1000),
       (g: Tandem) => g.fillU32Below(100, 1000),
     ],
+    [
+      Uint32Array,
+      (g: Tandem, o: Uint32Array) => g.fillChoice(o, TABLE),
+      (g: Tandem) => g.fillChoice(100, TABLE),
+    ],
   ] as const;
   for (const [Ctor, into, make] of kinds) {
     // A view with a nonzero offset in a larger buffer, as a caller's subarray would be.
@@ -333,6 +283,7 @@ test("empty fills align the plain kinds and the f64 normals, and leave the rest 
   assertEquals(run((g) => g.fillF64(0)), 64n);
   assertEquals(run((g) => g.fillBool(0)), 5n);
   assertEquals(run((g) => g.fillNormalF64(0)), 64n);
+  assertEquals(run((g) => g.fillChoice(0, TABLE)), 64n);
   for (
     const fill of [
       (g: Tandem) => g.fillU32Below(0, 7),
@@ -432,20 +383,17 @@ test("the stream is the block function for K = 1 and K = 65536", () => {
   }
 });
 
-test("draws stop at the 2^64 bound and a fill past it writes nothing", () => {
-  const key = seed(4n), top = (1n << 64n) - 64n;
-  const g = new Tandem(key, { position: top });
-  assertEquals(typeof g.nextU32(), "number");
-  assertThrows(() => g.nextU32(), RangeError);
-  assertEquals(g.position, top + 32n);
-  const out = new Uint32Array(4);
-  assertThrows(() => new Tandem(key, { position: top }).fillU32(out), RangeError);
-  assertEquals(out, new Uint32Array(4));
-  // The last draw that fits ends one word short of 2^64, even when it follows a row boundary.
-  const h = new Tandem(key, { position: (1n << 64n) - 1024n - 32n });
-  for (let i = 0; i < 32; i++) h.nextU32();
-  assertEquals(h.position, (1n << 64n) - 32n);
-  assertThrows(() => h.nextU32(), RangeError);
+test("a choice of 2^20 + 3 columns maps each draw by the 128-bit products of Appendix C", () => {
+  // The fixtures have m <= 100, where the carry into the column index almost never occurs.
+  // Here 1 in 4096 draws carries.
+  const m = (1 << 20) + 3, M = BigInt(m), n = 1 << 16;
+  const t = new ChoiceTable(Float64Array.from({ length: m }, (_, i) => 1 + (i % 7)));
+  const raw = Tandem.seed(1n).fillU64(n), got = Tandem.seed(1n).fillChoice(n, t);
+  for (let i = 0; i < n; i++) {
+    const x = raw[i] * M, j = Number(x >> 64n);
+    const v = ((x & ((1n << 64n) - 1n)) * t.capacity) >> 64n;
+    assertEquals(got[i], v < t.cut[j] ? j : t.alias[j], `draw ${i}`);
+  }
 });
 
 test("fillCpu returns the typed arrays and end position of fill, signed types included", () => {
@@ -468,6 +416,9 @@ test("fillCpu returns the typed arrays and end position of fill, signed types in
   assertEquals(z.position, align(position, 64) + 64n * 51n);
   const e = fillCpu({ key, position, count: 51, dtype: "f32", exponential: true });
   assertEquals(e.values, new Tandem(key, { position }).fillExponentialF32(51));
+  const c = fillCpu({ key, position, count: 51, dtype: "u32", choice: TABLE });
+  const g = new Tandem(key, { position });
+  assertEquals(c, { values: g.fillChoice(51, TABLE), position: g.position });
 });
 
 test("the JavaScript kernel gives the words of the WebAssembly kernel", () => {

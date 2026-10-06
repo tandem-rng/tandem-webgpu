@@ -51,7 +51,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun test tests/core.test.ts tests/cpu.test.ts
+      - run: bun test tests/core.test.ts tests/cpu.test.ts tests/conformance.test.ts
   build:
     name: npm build
     runs-on: ubuntu-latest
@@ -73,15 +73,20 @@ jobs:
       - run: naga tandem.wgsl
       - run: cat tandem.wgsl tandem_f32.wgsl tandem_derived.wgsl > all.wgsl && naga all.wgsl
   vectors:
-    name: vectors and ziggurat tables are current
+    name: vectors, conformance files and ziggurat tables are current
     runs-on: ubuntu-latest
+    env:
+      SPEC_PIN: f4205457e1e2ed19e655e36820015d7bdcf037dd
     steps:
       - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
       - run: |
-          git clone --depth 1 https://github.com/tandem-rng/spec ../tandem-spec
+          git clone https://github.com/tandem-rng/spec ../tandem-spec
+          git -C ../tandem-spec checkout --quiet "$SPEC_PIN"
           diff ../tandem-spec/vectors.json tests/vectors.json
+          for f in ../tandem-spec/conformance/*.json; do cmp "$f" "tests/conformance/${f##*/}"; done
+          diff <(cd ../tandem-spec/conformance && ls *.json) <(ls tests/conformance)
           deno run --allow-read --allow-write tools/gen_zig_tables.ts ../tandem-spec/tables/normal_f64_zig1024.json
           git diff --exit-code src/zig_tables.ts

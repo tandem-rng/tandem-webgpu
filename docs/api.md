@@ -99,13 +99,17 @@ to 64. It is also the `choice` option of `fill`, `fillBuffer` and `fillMany` wit
 the bytes of the stream blocks it covers. The cut must fit `maxStorageBufferBindingSize`, 8
 bytes per weight.
 
+`fill` and the other GPU fills take a `position` in `[0, 2^63)`, the start that section 5 of
+the specification allows a generator, and throw a `RangeError` otherwise.
+
 Deno and Bun run the TypeScript directly, and so does Node 24 or later. For browsers and older
 Node, `npm run build` emits `dist/`.
 
 ## CPU path
 
-`Tandem` takes a key and an optional `position` and `K`, and exposes `key`, `position` and
-`chunkLength`. It gives every draw the shaders give, with the same values, on any runtime.
+`Tandem` takes a key and an optional `position` in `[0, 2^63)` and `K`, and exposes `key`,
+`position` and `chunkLength`. Draws then continue past 2^63 up to the 2^64 bound of the stream.
+It gives every draw the shaders give, with the same values, on any runtime.
 Each fill takes a count and returns a new typed array, or takes a typed array, which may be a
 `subarray`, and fills it in place. Fills move the position past the draws they consume. An
 empty plain, Float64 normal or choice fill returns the aligned position, and an empty bounded,
