@@ -3,7 +3,8 @@
   "specifiers": {
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
-    "npm:typescript@7": "7.0.2"
+    "npm:typescript@7": "7.0.2",
+    "npm:wabt@1.0.39": "1.0.39"
   },
   "jsr": {
     "@std/assert@1.0.19": {
@@ -141,6 +142,10 @@
         "@typescript/typescript-win32-arm64",
         "@typescript/typescript-win32-x64"
       ],
+      "bin": true
+    },
+    "wabt@1.0.39": {
+      "integrity": "sha512-ba+dRL/75VQQY7RkU/CgriGbkoWAfS8TDyUlJfJhJ8KhtXgMl5dhNvoPNUcQ9IWRhW8u41glMSuZeTvsYq2rRg==",
       "bin": true
     }
   },

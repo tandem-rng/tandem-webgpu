@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { align, block, fillCpu, seed, Tandem } from "../src/mod.ts";
 import { fma32, fma64, horner64, LOG_POLY } from "../src/derived.ts";
+import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
 import { assertEquals, assertThrows, test } from "./harness.ts";
 import cross from "./cross.json" with { type: "json" };
@@ -473,4 +474,21 @@ test("fillCpu returns the typed arrays and end position of fill, signed types in
   assertEquals(z.position, align(position, 64) + 64n * 51n);
   const e = fillCpu({ key, position, count: 51, dtype: "f32", exponential: true });
   assertEquals(e.values, new Tandem(key, { position }).fillExponentialF32(51));
+});
+
+test("the JavaScript kernel gives the words of the WebAssembly kernel", () => {
+  // Fills across chunk groups and the 256-row output buffer, and scalar draws through windows.
+  const run = () =>
+    [1, 8, 32].flatMap((K) => {
+      const g = new Tandem(seed(9n), { position: 77n, K });
+      return [g.fillU32(300 * 32 + 5), Uint32Array.from({ length: 700 }, () => g.nextU32())];
+    });
+  const hasWasm = useWasm(true), wasm = run();
+  useWasm(false);
+  try {
+    assertEquals(run(), wasm);
+  } finally {
+    useWasm(true);
+  }
+  console.log(`WebAssembly kernel ${hasWasm ? "in use" : "missing, both runs used JavaScript"}`);
 });

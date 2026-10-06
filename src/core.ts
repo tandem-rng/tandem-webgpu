@@ -266,20 +266,19 @@ export class Tandem {
     return o;
   }
 
-  /** Fill the window from the row at the position. Stepping on from the last window of a chunk
-   * group reuses the lane state, and any other jump reseeds the group. */
+  /** Fill the window from the row at the position. Stepping on from the last window reuses
+   * the lane state, and any other jump reseeds the group. */
   #load(): void {
-    const K = BigInt(this.#K), row = this.#rowBase >> 10n, j = Number(row % K);
-    const take = Math.min(WINDOW_ROWS, this.#K - j);
+    const K = BigInt(this.#K), row = this.#rowBase >> 10n;
     const lanes = this.#lanes ??= newLanes(), win = this.#win ??= new Uint32Array(WINDOW_ROWS * 32);
-    if (this.#lanesAt === row && j > 0) {
-      runRows(lanes, 0, take, win, 0);
+    if (this.#lanesAt === row) {
+      runRows(lanes, 0, WINDOW_ROWS, win, 0);
     } else {
-      seedGroup(this.#key, row / K, lanes);
-      runRows(lanes, j, take, win, 0);
+      seedGroup(this.#key, row / K, this.#K, lanes);
+      runRows(lanes, Number(row % K), WINDOW_ROWS, win, 0);
     }
-    this.#lanesAt = row + BigInt(take);
-    this.#winWords = 32 * take;
+    this.#lanesAt = row + BigInt(WINDOW_ROWS);
+    this.#winWords = 32 * WINDOW_ROWS;
     this.#wi = 0;
   }
 

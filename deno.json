@@ -21,6 +21,7 @@
       "tests/vectors.json",
       "tests/cross.json",
       "src/shader.ts",
+      "src/stream_wasm.ts",
       "src/zig_tables.ts"
     ]
   }

@@ -27,8 +27,8 @@ jobs:
       - run: deno fmt --check src tests tools
       - run: deno lint src tests tools
       - run: deno task test
-      - name: Embedded shader is current
-        run: deno task embed && git diff --exit-code src/shader.ts
+      - name: Embedded shader and WebAssembly kernel are current
+        run: deno task embed && git diff --exit-code src/shader.ts src/stream_wasm.ts
   node:
     name: ${{ matrix.os }} / node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}

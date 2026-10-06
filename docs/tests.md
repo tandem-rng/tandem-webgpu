@@ -20,7 +20,8 @@ fill cut at arbitrary element boundaries equals the whole fill at a position wit
 `tests/cpu.test.ts` checks the exponentials against the fixtures of tandem-c and tandem-cuda
 and the three hashes in Fixtures. It checks the emulated `fma64` and `fma32` against an exact
 BigInt oracle on random and on halfway cases, and the Horner steps of the logarithm's
-polynomial against the chain of exact fused steps. It checks that scalar draws equal the fills across rows, windows and
+polynomial against the chain of exact fused steps. It checks that the JavaScript kernel gives
+the words of the WebAssembly kernel across chunk groups and output buffers. It checks that scalar draws equal the fills across rows, windows and
 chunk groups for K = 1, 8 and 32, from every bit offset for u8, u16 and bool, and that fills
 equal the `block` function at K = 1 and K = 65536. It checks fills into a caller array or
 `subarray`, empty fills of every kind, the width rule of `nextBelow` and `fillBelow`, normal
@@ -65,5 +66,5 @@ The tests reproduce three hashes of fills at starts 0, 1, 77, 12345 and 2^30 fro
 
 - CI runs `tests/core.test.ts` and `tests/cpu.test.ts` on Node, Deno and Bun.
 - CI runs the GPU tests with a software Vulkan adapter on Linux and on the macOS runner's GPU.
-- CI validates the shader with `naga`, and fails when the embedded shader, the vectors or the
-  ziggurat tables drift from their sources.
+- CI validates the shader with `naga`, and fails when the embedded shader, the embedded
+  WebAssembly kernel, the vectors or the ziggurat tables drift from their sources.

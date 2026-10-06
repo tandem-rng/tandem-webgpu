@@ -136,10 +136,11 @@ for `f32` and `f64`, and returns `{ values, position }` synchronously. It covers
 of `fill`, the signed types and `bool` included, so code can pick the CPU or the GPU path and
 read the same result.
 
-The fills run the stream kernel of `src/stream.ts`: the eight lanes of a chunk group stepped row
-by row with the lane state in locals, writing the words straight into the array. Scalar draws
-read a window of eight rows ahead and step on from the last window of a chunk group without
-reseeding. The `atU32`, `atU64`, `atF32` and `atF64` reads compute one block each, which suits a
+The fills run the stream kernel of `src/stream.wat`, WebAssembly SIMD that steps the eight lanes
+of a chunk group as two vectors of four, and copies 256 rows at a time into the array. Where an
+engine lacks WebAssembly SIMD, or a content security policy forbids compiling it, the JavaScript
+kernel of `src/stream.ts` gives the same words at a quarter of the speed. Scalar draws read a
+window of eight rows ahead and step on from the last window without reseeding. The `atU32`, `atU64`, `atF32` and `atF64` reads compute one block each, which suits a
 single element at a far position.
 
 ## Parallel use
