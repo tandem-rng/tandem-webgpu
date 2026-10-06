@@ -1,5 +1,5 @@
 // Readers for the conformance files of the specification. tests/conformance holds byte copies
-// of tandem-spec conformance/*.json at the commit CI pins.
+// of tandem-spec conformance/*.json at b31af72, the commit CI pins.
 import { createHash } from "node:crypto";
 import { align, type Key } from "../src/mod.ts";
 import below from "./conformance/below.json" with { type: "json" };
@@ -90,6 +90,15 @@ export function endOf(c: Raw): bigint {
   if (c.end !== undefined) return BigInt(c.end);
   const w = widthOf(c.kind), draws = c.kind === "fill_normal_f32" ? c.n + (c.n % 2) : c.n;
   return align(BigInt(c.start), w) + BigInt(w * draws);
+}
+
+/** The elements the checklist cuts a fill case at. A Float32 normal fill cuts only at pair
+ * boundaries: 2, 8, 20 and the largest even element below n. */
+export function cutsOf(c: Raw): number[] {
+  const at = c.kind === "fill_normal_f32"
+    ? [2, 8, 20, c.n - 1 - ((c.n - 1) % 2)]
+    : [1, 7, 20, 21, c.n - 1];
+  return at.filter((k) => k > 0 && k < c.n);
 }
 
 /** True when y passes against the fixture x: bit for bit, or within the case's tolerance. A

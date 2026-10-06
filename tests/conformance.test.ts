@@ -1,5 +1,5 @@
 // The CPU path against the conformance files of the specification, one test per section of
-// its conformance/CHECKLIST.md.
+// its conformance/CHECKLIST.md at tandem-spec b31af72.
 import { existsSync } from "node:fs";
 import { block, ChoiceTable, seed, Tandem } from "../src/mod.ts";
 import {
@@ -7,6 +7,7 @@ import {
   allCases,
   byName,
   cases,
+  cutsOf,
   endOf,
   expected,
   f64,
@@ -162,11 +163,7 @@ test("weighted choice: 1e6 draws follow the weights by chi-square", () => {
 test("cut fill: pieces filled in order on one generator equal the whole fill", () => {
   for (const c of allCases().filter((c) => c.kind.startsWith("fill_") && c.n > 0)) {
     const whole = run(c, generator(c), c.n);
-    // A Float32 normal pair is two elements, so its fill cuts at even elements.
-    const cuts = [1, 7, 20, 21, c.n - 1].filter((k) =>
-      k > 0 && k < c.n && (c.kind !== "fill_normal_f32" || k % 2 === 0)
-    );
-    for (const k of cuts) {
+    for (const k of cutsOf(c)) {
       const g = generator(c), head = run(c, g, k), tail = run(c, g, c.n - k);
       assertEquals(head, whole.subarray(0, k), `${c.id} head ${k}`);
       assertEquals(tail, whole.subarray(k), `${c.id} tail ${k}`);
@@ -175,7 +172,9 @@ test("cut fill: pieces filled in order on one generator equal the whole fill", (
   }
 });
 
-// UInt128, Float16, Char and the complex types have no fill in this port.
+// Instead of the checklist items on UInt128, Float16, Char and complex draws: this port has no
+// draw of these types, so it hashes the streams of the types it fills and skips the others,
+// and the complex draw across a block does not apply.
 const STREAM_FILLS: Record<string, (g: Tandem, n: number) => ArrayBufferView> = {
   UInt8: (g, n) => g.fillU8(n),
   UInt32: (g, n) => g.fillU32(n),
@@ -235,5 +234,6 @@ test("2^63 position bounds: starts, and a UInt64 draw at 2^63 - 1", () => {
   const b = block(key, 8n * ((1n << 53n) / 32n), Number((1n << 53n) % 32n));
   assertEquals(g.nextU64(), BigInt(b[0]) | (BigInt(b[1]) << 32n));
   assertEquals(g.position, (1n << 63n) + 64n);
-  // A fill end can not reach 2^64 here: counts are numbers below 2^53 and starts below 2^63.
+  // Instead of the checklist item on a fill that reaches 2^64: starts are rejected at or above
+  // 2^63, and a fill count is a number below 2^53, so a fill can not reach 2^64 bits.
 });

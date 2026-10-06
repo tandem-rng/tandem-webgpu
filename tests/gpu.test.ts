@@ -16,7 +16,7 @@ import {
   Tandem,
   toFloat32,
 } from "../src/mod.ts";
-import { agrees, allCases, endOf, f64, keyOf } from "./fixtures.ts";
+import { agrees, allCases, cutsOf, endOf, f64, keyOf } from "./fixtures.ts";
 import vectors from "./vectors.json" with { type: "json" };
 
 const adapter = await navigator.gpu?.requestAdapter();
@@ -239,12 +239,8 @@ Deno.test({ name: "conformance cases: values, end position and cut fills", ...gp
       const { values, position } = await gpuFill(c);
       assertEquals(agrees(c, values), true, `${c.id} values`);
       assertEquals(position, endOf(c), `${c.id} end`);
-      // The pieces of a fill cut at an element, the second from the end of the first. A Float32
-      // normal fill cuts at even elements.
-      const cuts = [1, 7, 20, 21, c.n - 1].filter((k) =>
-        k > 0 && k < c.n && (c.kind !== "fill_normal_f32" || k % 2 === 0)
-      );
-      for (const k of cuts) {
+      // The pieces of a fill cut at an element, the second from the end of the first.
+      for (const k of cutsOf(c)) {
         const head = await gpuFill(c, k), tail = await gpuFill(c, c.n - k, head.position);
         assertEquals(head.values, values.subarray(0, k) as never, `${c.id} head ${k}`);
         assertEquals(tail.values, values.subarray(k) as never, `${c.id} tail ${k}`);
