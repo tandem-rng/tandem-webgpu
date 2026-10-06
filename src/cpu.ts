@@ -26,15 +26,17 @@ const WIDTH = {
  * Fill `count` values of `dtype` as `count` scalar draws would, on the CPU. The options are
  * those of `fill`, and `normal` and `exponential` also take `f64`, which the GPU lacks. The
  * signed types read the unsigned words two's complement and `bool` gives one stream bit per
- * element. The values equal the GPU's for every dtype and for bounded integers, and for
- * normals within the tolerance of Appendix A.
+ * element. The values equal the GPU's for every dtype, for bounded integers and for weighted
+ * choice, and for normals within the tolerance of Appendix A.
  */
 export function fillCpu<D extends HostDType>(
-  { key, position = 0n, count, dtype, K = DEFAULT_K, range, normal, exponential }: CpuFillOptions<
-    D
-  >,
+  { key, position = 0n, count, dtype, K = DEFAULT_K, range, normal, exponential, choice }:
+    CpuFillOptions<D>,
 ): Fill<Values<D>> {
   const w = WIDTH[dtype];
+  if (choice && (dtype !== "u32" || range !== undefined || normal || exponential)) {
+    throw new RangeError("choice applies to dtype u32 only, without range, normal or exponential");
+  }
   const float = dtype === "f32" || dtype === "f64";
   if ((normal || exponential) && !float) {
     throw new RangeError("normal and exponential apply to dtype f32 and f64 only");
@@ -48,6 +50,7 @@ export function fillCpu<D extends HostDType>(
 
   const rng = new Tandem(key as Key, { position, K });
   const values = (() => {
+    if (choice) return rng.fillChoice(count, choice);
     if (range !== undefined) {
       return dtype === "u32"
         ? rng.fillU32Below(count, Number(bound))

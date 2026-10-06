@@ -10,8 +10,12 @@
 // separate pass handles without neighbour exchange.
 //
 // `exponential_f32` turns a buffer of f32 uniforms into -ln(1 - u) in place, one per element.
+//
+// `fill_choice` maps every 64-bit draw through an alias table built on the host (Appendix C)
+// to one u32 index, with no retry.
 
-// Second uniform: (range lo, range hi) for the bounded fills, (slot, n, pairs, workgroups in x) for the pairs.
+// Second uniform: (range lo, range hi) for the bounded fills, (slot, n, pairs, workgroups in x)
+// for the pairs, (capacity lo, capacity hi, m) for the choice.
 @group(0) @binding(2) var<uniform> Q: vec4<u32>;
 
 const PURPOSE_BELOW_LO32: u32 = 0x4c573332u; // 0x424c573332 is the 32-bit purpose
@@ -165,6 +169,43 @@ fn fill_below64(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) 
             let a = below64(s.o.xy, range, P.key, d, P.K);
             let b = below64(s.o.zw, range, P.key, add64(d, 1u), P.K);
             out[u32(i)] = vec4<u32>(a, b);
+        }
+    }
+}
+
+// ---- Weighted choice -----------------------------------------------------------------------
+//
+// The cut of each column as (lo, hi) and its alias. A 64-bit cut is compared as two halves.
+
+@group(0) @binding(3) var<storage, read> choice_cut: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read> choice_alias: array<u32>;
+
+// x = r m: the column j is x >> 64 and f = x mod 2^64, then j is kept when (f S) >> 64 < cut[j].
+fn choice_index(r: vec2<u32>) -> u32 {
+    let m = Q.z;
+    let lo1 = r.y * m;
+    let s = mul_hi(r.x, m) + lo1;
+    let j = mul_hi(r.y, m) + select(0u, 1u, s < lo1);
+    let v = mul64(vec2<u32>(r.x * m, s), Q.xy)[1];
+    return select(choice_alias[j], j, lt64(v, choice_cut[j]));
+}
+
+// The traversal is `fill_below64`'s. Stream block i gives the indices of its two draws, which
+// land in words 2 i and 2 i + 1 of the window.
+@compute @workgroup_size(THREADS)
+fn fill_choice(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    let gi = t >> 3u;
+    let lane = t & 7u;
+    let g = add64(add64(P.g0, wg.x * GROUPS), gi);
+    let c = add64(shl64(g, 3u), lane);
+    var s = F_keyed(P.key, c.x, c.y, DOMAIN_STREAM, AUX_STREAM);
+    let first = add64(shl64(g, firstTrailingBit(P.K) + 3u), lane);
+    for (var j = 0u; j < P.K; j++) {
+        s = T(s);
+        let i = sub64_small(add64(first, j * 8u), P.base);
+        if (i >= 0 && u32(i) < P.n_blocks) {
+            out_words[2u * u32(i)] = choice_index(s.o.xy);
+            out_words[2u * u32(i) + 1u] = choice_index(s.o.zw);
         }
     }
 }

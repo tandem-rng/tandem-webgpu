@@ -3,13 +3,14 @@
 ## Use
 
 ```ts
-import { fill, fillCpu, requestDevice, seed, split, Tandem } from "tandem-webgpu";
+import { ChoiceTable, fill, fillCpu, requestDevice, seed, split, Tandem } from "tandem-webgpu";
 
 const key = seed(42n);
 const rng = new Tandem(key);
 const xs = rng.fillF64(1 << 20);          // or rng.fillF64(out) to fill your own array
 const dice = rng.fillU32Below(1000, 6);
 const z = rng.fillNormalF64(1000);        // fillExponentialF64 likewise
+const picks = rng.fillChoice(1000, new ChoiceTable([1, 2, 3, 4]));
 const worker = split(key, 7n);            // also sub(purpose), fork(n)
 
 const cpu = fillCpu({ key, count: 1000, dtype: "u32" });             // { values, position }
@@ -25,6 +26,8 @@ const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" }
 - `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller f32 and ziggurat f64 normals, exact
   with tandem-c on CPU.
 - `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, same logarithm.
+- `ChoiceTable`, `fillChoice`, `nextChoice`: weighted choice by an alias table, exact with
+  tandem-c on CPU and GPU.
 - `seed`, `split`, `sub`, `fork`: keys and child generators.
 
 ## Shaders and GPU fills
@@ -35,8 +38,9 @@ const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" }
 - `tandem_f32.wgsl`: the `fill_f32` entry point, which stores Float32 values instead of words.
   It is appended to `tandem.wgsl` when the shader is embedded, so `tandem.wgsl` stays identical
   to the copy in tandem-rs.
-- `tandem_derived.wgsl`: the entry points `fill_below32`, `fill_below64` and `normal_pairs` for
-  bounded integers and normals (Appendix A of the specification), appended the same way.
+- `tandem_derived.wgsl`: the entry points `fill_below32`, `fill_below64`, `normal_pairs` and
+  `exponential_f32` for bounded integers, normals and exponentials (Appendix A of the
+  specification), and `fill_choice` for weighted choice (Appendix C), appended the same way.
 - `src/`: the `Tandem` class and `fillCpu` for draws and fills on the CPU, the key functions
   `seed`, `split`, `sub`, `fork`, the float mappings, and `fill`, which runs the shader and
   reads back a typed array. No dependencies.
@@ -59,8 +63,8 @@ compute pass and submits once, then returns one result per item in order. It che
 before it submits, and items run in order, so they may share a buffer.
 
 A fill larger than the adapter's `maxStorageBufferBindingSize` needs no special call. Every fill
-is exact at any block boundary, so `fillBuffer`, `fill`, `fillBelow`, `fillNormal` and `fillMany`
-bind the buffer in windows of at most that size, at offsets that meet the offset alignment, and
+is exact at any block boundary, so `fillBuffer`, `fill`, `fillBelow`, `fillNormal`, `fillChoice`
+and `fillMany` bind the buffer in windows of at most that size, at offsets that meet the offset alignment, and
 dispatch each one. The normal pass cuts at even elements. The buffer itself must still fit
 `maxBufferSize`, and a fill that needs more throws a `RangeError`.
 
@@ -83,6 +87,18 @@ with them. Values agree with the other ports to 16 ulps plus 1e-6, the tolerance
 The GPU runs the uniform fill and then a pair pass over the same buffer, so the pairs may
 straddle stream blocks at any start. There is no GPU `f64` normal, for lack of an f64 type.
 
+Weighted choice follows Appendix C. `new ChoiceTable(weights)` builds the alias table on the
+host from Float64 weights in exact BigInt arithmetic, so `capacity`, `cut` and `alias` equal
+tandem-c's `tandem_choice_build`. It throws a `RangeError` unless `1 <= m < 2^32` and the
+weights are finite, not negative and not all zero. `fillChoice(device, {key, position, count,
+choice})` returns a Uint32Array of indices: element `i` maps 64-bit draw `i` through the table,
+with no retry, so the fill consumes 64 bits per element and an empty fill aligns the position
+to 64. It is also the `choice` option of `fill`, `fillBuffer` and `fillMany` with `dtype:
+"u32"`. The `fill_choice` entry point reads the table from two storage buffers, compares each
+64-bit cut as two 32-bit halves, and writes one index per draw, so a caller `buffer` needs half
+the bytes of the stream blocks it covers. The cut must fit `maxStorageBufferBindingSize`, 8
+bytes per weight.
+
 Deno and Bun run the TypeScript directly, and so does Node 24 or later. For browsers and older
 Node, `npm run build` emits `dist/`.
 
@@ -92,8 +108,8 @@ Node, `npm run build` emits `dist/`.
 `chunkLength`. It gives every draw the shaders give, with the same values, on any runtime.
 Each fill takes a count and returns a new typed array, or takes a typed array, which may be a
 `subarray`, and fills it in place. Fills move the position past the draws they consume. An
-empty plain or Float64 normal fill returns the aligned position, and an empty bounded, Float32
-normal or exponential fill moves nothing.
+empty plain, Float64 normal or choice fill returns the aligned position, and an empty bounded,
+Float32 normal or exponential fill moves nothing.
 
 | Draw | Scalar | Fill | Array |
 |---|---|---|---|
@@ -105,6 +121,7 @@ normal or exponential fill moves nothing.
 | bounded | `nextU32Below`, `nextU64Below`, `nextBelow` | `fillU32Below`, `fillU64Below`, `fillBelow` | `Uint32Array`, `BigUint64Array` |
 | normal | `nextNormalF32`, `nextNormalF64`, `nextNormal2F32` | `fillNormalF32`, `fillNormalF64` | `Float32Array`, `Float64Array` |
 | exponential | `nextExponentialF32`, `nextExponentialF64` | `fillExponentialF32`, `fillExponentialF64` | `Float32Array`, `Float64Array` |
+| weighted choice | `nextChoice(table)` | `fillChoice(n, table)` | `Uint32Array` of indices |
 
 The bounded draws follow Appendix A. A scalar draw rejects on the draws that follow, and a fill
 retries a rejected element on the fallback generator of its global draw index, so a fill cut at

@@ -1,5 +1,6 @@
 // The WebGPU fill: stream words in row order from an aligned bit position.
 
+import type { ChoiceTable } from "./choice.ts";
 import { align, checkK, DEFAULT_K, type Key, mapF64 } from "./core.ts";
 import { SHADER } from "./shader.ts";
 
@@ -39,6 +40,10 @@ export type FillOptions = {
    * agree with other ports within 8 ulps plus 1e-6, since WGSL does not promise the fused
    * multiply-add. */
   exponential?: boolean;
+  /** For `u32`: weighted choice indices through this alias table, Appendix C. Element i maps
+   * 64-bit draw i with no retry, so the fill consumes 64 bits per element and `buffer` holds
+   * one index per draw of the blocks it covers. An empty fill aligns the position to 64. */
+  choice?: ChoiceTable;
 };
 
 export type Fill<T> = { values: T; position: bigint };
@@ -52,7 +57,8 @@ type Entry =
   | "fill_below32"
   | "fill_below64"
   | "normal_pairs"
-  | "exponential_f32";
+  | "exponential_f32"
+  | "fill_choice";
 
 function pipelineFor(device: GPUDevice, entryPoint: Entry) {
   let byEntry = pipelines.get(device);
@@ -83,8 +89,10 @@ type Job = {
   entry: Entry;
   /** Binding 0, the fill parameters. The pair pass has none. */
   params?: Uint32Array<ArrayBuffer>;
-  /** Binding 2, the range or the pair layout. */
+  /** Binding 2, the range, the pair layout or the choice capacity. */
   extra?: Uint32Array<ArrayBuffer>;
+  /** Bindings 3 and 4, the cut and alias of a choice table. */
+  table?: [GPUBuffer, GPUBuffer];
   workgroups: [number, number];
   buffer: GPUBuffer;
   /** The bound window of `buffer`, never larger than the adapter's binding limit. */
@@ -104,11 +112,28 @@ function isApple(device: GPUDevice): boolean {
 }
 const PAIR_THREADS = 256;
 
-/** Largest window one dispatch may bind: the binding limit, and what 65535 workgroups reach. */
-function windowBytes(device: GPUDevice, K: number): number {
-  const step = Math.max(256, device.limits.minStorageBufferOffsetAlignment);
+/** Largest window of stream bytes one dispatch may bind: the binding limit, and what 65535
+ * workgroups reach. The output of a window is its stream bytes over `shrink`, so its offset
+ * still meets the offset alignment. */
+function windowBytes(device: GPUDevice, K: number, shrink = 1): number {
+  const step = Math.max(256, device.limits.minStorageBufferOffsetAlignment) * shrink;
   const reach = (MAX_WORKGROUPS * GROUPS - 1) * 128 * K;
-  return Math.floor(Math.min(device.limits.maxStorageBufferBindingSize, reach) / step) * step;
+  const limit = device.limits.maxStorageBufferBindingSize * shrink;
+  return Math.floor(Math.min(limit, reach) / step) * step;
+}
+
+/** A storage buffer holding `data`, written at creation so no queue is touched. */
+function storageOf(device: GPUDevice, data: ArrayBufferView): GPUBuffer {
+  const buffer = device.createBuffer({
+    size: data.byteLength,
+    usage: STORAGE,
+    mappedAtCreation: true,
+  });
+  new Uint8Array(buffer.getMappedRange()).set(
+    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+  );
+  buffer.unmap();
+  return buffer;
 }
 
 /** Validate one fill, allocate its buffer and compute its dispatches. Touches no queue. */
@@ -125,10 +150,15 @@ function plan(
     range,
     normal,
     exponential,
+    choice,
   }: FillOptions,
 ): { placed: Placed; jobs: Job[] } {
   checkK(K);
-  const w = WIDTH[dtype];
+  if (choice && (dtype !== "u32" || floats || range !== undefined || normal || exponential)) {
+    throw new RangeError("choice applies to dtype u32 only, without range, normal or exponential");
+  }
+  // A choice takes 64-bit draws and writes a 32-bit index for each, half the stream's bytes.
+  const w = choice ? 64 : WIDTH[dtype], shrink = choice ? 2 : 1;
   if (floats && dtype !== "f32") throw new RangeError("floats applies to dtype f32 only");
   if (normal && (dtype !== "f32" || range !== undefined)) {
     throw new RangeError("normal applies to dtype f32 only, without range");
@@ -149,16 +179,20 @@ function plan(
   const blockStart = p0 >> 7n;
   const blockEnd = (p1 + 127n) >> 7n;
   const nBlocks = Number(blockEnd - blockStart);
-  const byteLength = BigInt(w) * BigInt(count) / 8n;
-  const byteOffset = Number(p0 - (blockStart << 7n)) / 8;
+  const byteLength = BigInt(w / shrink) * BigInt(count) / 8n;
+  const byteOffset = Number(p0 - (blockStart << 7n)) / 8 / shrink;
+  const bytes = nBlocks * 16 / shrink;
 
-  if (buffer && buffer.size < nBlocks * 16) {
-    throw new RangeError(`buffer holds ${buffer.size} bytes, the fill needs ${nBlocks * 16}`);
+  if (buffer && buffer.size < bytes) {
+    throw new RangeError(`buffer holds ${buffer.size} bytes, the fill needs ${bytes}`);
   }
-  if (!buffer && nBlocks * 16 > device.limits.maxBufferSize) {
-    throw new RangeError(`the fill needs ${nBlocks * 16} bytes, over maxBufferSize`);
+  if (!buffer && bytes > device.limits.maxBufferSize) {
+    throw new RangeError(`the fill needs ${bytes} bytes, over maxBufferSize`);
   }
-  buffer ??= device.createBuffer({ size: Math.max(16, nBlocks * 16), usage: STORAGE | COPY_SRC });
+  if (choice && choice.cut.byteLength > device.limits.maxStorageBufferBindingSize) {
+    throw new RangeError("the choice table is over maxStorageBufferBindingSize");
+  }
+  buffer ??= device.createBuffer({ size: Math.max(16, bytes), usage: STORAGE | COPY_SRC });
   // A derived fill with no elements draws nothing, so it does not even align the position.
   const derived = normal || exponential || range !== undefined;
   const placed = {
@@ -169,20 +203,27 @@ function plan(
   };
   if (nBlocks === 0 || (derived && count === 0)) return { placed, jobs: [] };
 
-  const entry: Entry = range !== undefined
+  const entry: Entry = choice
+    ? "fill_choice"
+    : range !== undefined
     ? (w === 32 ? "fill_below32" : "fill_below64")
     : floats || normal || exponential
     ? "fill_f32"
     : K % TILE_STEPS === 0 && !isApple(device)
     ? "fill_tile"
     : "fill";
-  const extra = range !== undefined
+  const S = choice?.capacity ?? 0n;
+  const extra = choice
+    ? new Uint32Array([Number(S & 0xffffffffn), Number(S >> 32n), choice.alias.length, 0])
+    : range !== undefined
     ? new Uint32Array([Number(bound & 0xffffffffn), Number(bound >> 32n), 0, 0])
     : undefined;
+  const table: [GPUBuffer, GPUBuffer] | undefined = choice &&
+    [storageOf(device, choice.cut), storageOf(device, choice.alias)];
 
   // Every fill is exact at any block boundary, so the buffer is cut into windows that each fit
   // one binding and one dispatch. A window starts at a multiple of the offset alignment.
-  const win = windowBytes(device, K);
+  const win = windowBytes(device, K, shrink);
   const rowsPerGroup = BigInt(K);
   const jobs: Job[] = [];
   for (let offset = 0; offset < nBlocks * 16; offset += win) {
@@ -200,7 +241,16 @@ function plan(
     params[8] = size / 16;
     params[9] = K;
     const workgroups = Math.ceil(Number(g1 - g0 + 1n) / GROUPS);
-    jobs.push({ entry, params, extra, workgroups: [workgroups, 1], buffer, offset, size });
+    jobs.push({
+      entry,
+      params,
+      extra,
+      table,
+      workgroups: [workgroups, 1],
+      buffer,
+      offset: offset / shrink,
+      size: size / shrink,
+    });
   }
   if (exponential) {
     // One element per invocation, laid over the elements after every fill window has written.
@@ -267,11 +317,17 @@ async function dispatch(device: GPUDevice, jobs: Job[]): Promise<void> {
     uniforms.push(u);
     return u;
   };
-  for (const { entry, params, extra, workgroups, buffer, offset, size } of jobs) {
+  const tables = new Set<GPUBuffer>();
+  for (const { entry, params, extra, table, workgroups, buffer, offset, size } of jobs) {
     const pipeline = pipelines.get(entry)!;
     const entries: GPUBindGroupEntry[] = [{ binding: 1, resource: { buffer, offset, size } }];
     if (params) entries.push({ binding: 0, resource: { buffer: uniform(params) } });
     if (extra) entries.push({ binding: 2, resource: { buffer: uniform(extra) } });
+    if (table) {
+      entries.push({ binding: 3, resource: { buffer: table[0] } });
+      entries.push({ binding: 4, resource: { buffer: table[1] } });
+      table.forEach((t) => tables.add(t));
+    }
     pass.setPipeline(pipeline);
     pass.setBindGroup(
       0,
@@ -281,7 +337,7 @@ async function dispatch(device: GPUDevice, jobs: Job[]): Promise<void> {
   }
   pass.end();
   device.queue.submit([encoder.finish()]);
-  for (const u of uniforms) u.destroy();
+  for (const u of [...uniforms, ...tables]) u.destroy();
 }
 
 /**
@@ -376,6 +432,14 @@ export function fillNormal(device: GPUDevice, options: Plain): Promise<Fill<Floa
 /** Standard exponentials as Float32 on the GPU, read back. See `FillOptions.exponential`. */
 export function fillExponential(device: GPUDevice, options: Plain): Promise<Fill<Float32Array>> {
   return fill(device, { ...options, dtype: "f32", exponential: true });
+}
+
+/** Weighted choice indices on the GPU, read back. See `FillOptions.choice`. */
+export function fillChoice(
+  device: GPUDevice,
+  options: Plain & { choice: ChoiceTable },
+): Promise<Fill<Uint32Array>> {
+  return fill(device, { ...options, dtype: "u32" });
 }
 
 /** Bits are unaligned to bytes, so read whole words that cover them and cut the bits out. */

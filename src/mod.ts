@@ -19,12 +19,14 @@ export {
   toFloat64,
 } from "./core.ts";
 export type { Key, State } from "./core.ts";
+export { ChoiceTable } from "./choice.ts";
 export { fillCpu } from "./cpu.ts";
 export type { CpuFillOptions } from "./cpu.ts";
 export {
   fill,
   fillBelow,
   fillBuffer,
+  fillChoice,
   fillExponential,
   fillMany,
   fillNormal,

@@ -2,6 +2,7 @@
 // and the `Tandem` generator. Single steps use Math.imul and >>> 0, positions use BigInt, and
 // bulk output comes from the lane kernel in stream.ts.
 
+import { type ChoiceTable, choiceWords } from "./choice.ts";
 import {
   type Draws64,
   exponential32,
@@ -141,6 +142,8 @@ const PURPOSE_NORMAL64 = 0x4e524d3634n;
 // A scalar draw reads this many rows ahead, so a cold position costs one window and not a chunk.
 const WINDOW_ROWS = 8;
 const RANGE32 = 2 ** 32;
+// Draws per stream call of a choice fill, which bounds its scratch words.
+const CHOICE_BLOCK = 1 << 14;
 const MASK64 = (1n << 64n) - 1n;
 const pair = new Float64Array(2);
 const pairF = new Float32Array(2);
@@ -623,6 +626,30 @@ export class Tandem {
     if (out.length === 0) return out;
     this.#uniformsF32(out, out.length);
     exponential32(out, out.length);
+    return out;
+  }
+
+  /** An index drawn through the alias table of `table`, Appendix C. It consumes one 64-bit
+   * draw and equals element 0 of `fillChoice`. */
+  nextChoice(table: ChoiceTable): number {
+    const [lo, hi] = this.nextU64Pair(), out = new Uint32Array(1);
+    choiceWords(table, Uint32Array.of(lo, hi), out);
+    return out[0];
+  }
+  /**
+   * Weighted choice indices. Element i maps 64-bit draw i through the table, with no retry, so
+   * a fill cut at any element equals the whole fill. An empty fill aligns the position to 64.
+   */
+  fillChoice(n: number | Uint32Array, table: ChoiceTable): Uint32Array {
+    const out = target(Uint32Array, n), count = out.length;
+    const p = this.#span(this.position, BigInt(count), 64);
+    const words = new Uint32Array(2 * Math.min(count, CHOICE_BLOCK));
+    for (let i = 0; i < count; i += CHOICE_BLOCK) {
+      const k = Math.min(CHOICE_BLOCK, count - i);
+      streamWords(this.#key, this.#K, (p >> 5n) + BigInt(2 * i), words, 0, 2 * k);
+      choiceWords(table, words, out.subarray(i, i + k));
+    }
+    this.#setPosition(p + 64n * BigInt(count));
     return out;
   }
 
