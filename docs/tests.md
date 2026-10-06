@@ -12,7 +12,8 @@ deno task test           # also the GPU tests
 run on Node, Deno and Bun.
 
 `tests/conformance.test.ts` reads the conformance files of the specification in
-`tests/conformance` and has one test per section of the spec's `conformance/CHECKLIST.md`. It
+`tests/conformance` and has one test per section of the spec's `conformance/CHECKLIST.md` at
+b31af72. It
 runs every case of `below.json`, `fill_below.json`, `normal.json`, `exponential.json` and
 `choice.json` on the `Tandem` class and checks the values and the end position, the seven empty
 fills included. It checks that `n` scalar draws equal each Float64 normal, exponential and
@@ -21,8 +22,9 @@ fill for the bounded, normal and choice cases named in the checklist, the width 
 takes from its range, range 0, the end position of an odd Float32 normal fill, and the pair rule
 of Box-Muller. It builds the table of every choice case and compares `capacity`, `cut` and
 `alias`, checks a scalar choice, `m = 1` and the rejected weights, and the law of 1e6 choice
-draws by chi-square. It cuts every fill case at elements 1, 7, 20, 21 and `n - 1`, Float32
-normals at the even ones, and fills the pieces in order on one generator. It reproduces the
+draws by chi-square. It cuts every fill case at elements 1, 7, 20, 21 and `n - 1`, and the
+Float32 normals at the pair boundaries 2, 8, 20 and the largest even element below `n`, and
+fills the pieces in order on one generator. The GPU suite cuts at the same elements. It reproduces the
 stream hashes of `hashes.json` for every type the port fills, checks the dumps in `tests/data`
 against them, and reproduces the dump hashes of the Float64 and Float32 normals. It checks the
 2^63 start bound and a UInt64 draw at 2^63 - 1.
@@ -68,20 +70,21 @@ tests skip when no adapter exists.
 
 ## Checklist gaps
 
+The tests state what the port does instead of each item its API can not express.
+
 - Complex draws and the UInt128, Float16 and Char fills do not exist in this port, so their
   stream hashes and the complex draw across a block do not apply.
 - A start lies below 2^63 and a count is a number below 2^53, so no fill can reach 2^64. The
   endpoint check stays in the code but no test can reach it.
 - The Float64 exponentials round each multiply-add twice for speed and stay within 4 ulps of
   the fixtures. Their exact fused form matches the dump hash.
-- A Float32 normal fill cuts at even elements only, by the pair rule.
 
 ## Fixtures
 
 | Fixture | Commit |
 |---|---|
-| the specification's `conformance/*.json`, copied byte for byte to `tests/conformance` | f420545 |
-| the specification's `vectors.json` | f420545 |
+| the specification's `conformance/*.json`, copied byte for byte to `tests/conformance` | b31af72 |
+| the specification's `vectors.json` | b31af72 |
 | the specification's `tables/normal_f64_zig1024.json`, SHA-256 checked | 469a0ae |
 
 The conformance files come from tandem-c at 1adf2ac. `tests/data` holds six of the stream dumps
