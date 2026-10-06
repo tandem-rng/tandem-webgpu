@@ -63,7 +63,10 @@ Variants measured on this GPU and rejected, all within noise of the committed sh
 slower: a plain `*` in place of the exact 16-bit-half `mul_hi`, no bounds check, workgroups
 of 64 or 128, four steps unrolled per store burst, a lane-major thread mapping, two chunks
 per invocation, and a workgroup tile with 512-byte writes per SIMD group, which
-measured four times slower.
+measured five times slower. Off Apple GPUs the raw-word fill takes that tile, `fill_tile`:
+under wgpu on an NVIDIA A100 the same shader in tandem-rs ran its kernel at 1344 GiB/s
+against 1294 for the direct stores. Deno offers no way to pick one of the host's two A100s, so
+this page has no A100 row.
 
 A bounded fill costs the same as a plain fill until draws reject. A rejection derives a
 fallback key with three seeding functions and then draws on that stream, so the half-rejecting
