@@ -92,11 +92,11 @@ fn sub_key(key: vec4<u32>, purpose_lo: u32, purpose_hi: u32) -> vec4<u32> {
 
 // ---- Row fill -------------------------------------------------------------------------
 //
-// One invocation per chunk, 32 groups of 8 lanes per workgroup, each storing its 16-byte
-// block straight to the output. The eight lanes of a group write one contiguous 128-byte
-// row, so stores coalesce without staging. A workgroup tile with 512-byte writes per
-// SIMD group, measured four times slower on Apple M4 Pro under
-// Metal, so it is not used here.
+// One invocation per chunk, 32 groups of 8 lanes per workgroup. `fill` stores each 16-byte
+// block straight to the output: the eight lanes of a group write one contiguous 128-byte row.
+// `fill_tile` stages TILE_STEPS rows of every group in workgroup memory first, so 32
+// consecutive invocations store 512 contiguous bytes. The tile is 4 % faster on an NVIDIA
+// A100 under Vulkan and five times slower on an Apple M4 Pro under Metal.
 
 const THREADS = 256u;
 const GROUPS = 32u;
@@ -145,5 +145,38 @@ fn fill(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) wg: vec3
         if (i >= 0 && u32(i) < P.n_blocks) {
             out[u32(i)] = s.o;
         }
+    }
+}
+
+// 16 KiB of workgroup memory, the WebGPU default limit. Eight steps measured no faster.
+const TILE_STEPS = 4u;
+var<workgroup> tile: array<vec4<u32>, 1024>;
+
+// The fill through the tile, for K a multiple of TILE_STEPS. A group's TILE_STEPS rows are
+// contiguous in the stream, so slot k of the tile is block k of its group's run.
+@compute @workgroup_size(THREADS)
+fn fill_tile(@builtin(local_invocation_index) t: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    let gi = t >> 3u;
+    let lane = t & 7u;
+    let gw = add64(P.g0, wg.x * GROUPS);
+    let c = add64(shl64(add64(gw, gi), 3u), lane);
+    var s = F_keyed(P.key, c.x, c.y, DOMAIN_STREAM, AUX_STREAM);
+    // The workgroup's first block relative to the buffer's. Fills stay below 2^31 blocks, so
+    // the offsets fit an i32.
+    let w0 = i32(shl64(gw, firstTrailingBit(P.K) + 3u).x - P.base.x);
+    for (var jb = 0u; jb < P.K; jb += TILE_STEPS) {
+        for (var j = 0u; j < TILE_STEPS; j++) {
+            s = T(s);
+            tile[(gi * TILE_STEPS + j) * 8u + lane] = s.o;
+        }
+        workgroupBarrier();
+        for (var k = 0u; k < TILE_STEPS; k++) {
+            let slot = t + THREADS * k;
+            let i = w0 + i32((slot / (TILE_STEPS * 8u)) * P.K * 8u + jb * 8u + slot % (TILE_STEPS * 8u));
+            if (i >= 0 && u32(i) < P.n_blocks) {
+                out[u32(i)] = tile[slot];
+            }
+        }
+        workgroupBarrier();
     }
 }

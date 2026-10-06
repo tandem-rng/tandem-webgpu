@@ -47,6 +47,7 @@ const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>
 
 type Entry =
   | "fill"
+  | "fill_tile"
   | "fill_f32"
   | "fill_below32"
   | "fill_below64"
@@ -92,6 +93,15 @@ type Job = {
 };
 
 const MAX_WORKGROUPS = 65535;
+// Rows per tile of `fill_tile`, which needs K to be a multiple of it.
+const TILE_STEPS = 4;
+
+/** Apple GPUs run the tile kernel five times slower than the direct stores, an A100 faster.
+ * Browsers name the vendor, and Deno on Metal names the GPU in the description. */
+function isApple(device: GPUDevice): boolean {
+  const info = device.adapterInfo;
+  return /apple/i.test(`${info.vendor} ${info.description}`);
+}
 const PAIR_THREADS = 256;
 
 /** Largest window one dispatch may bind: the binding limit, and what 65535 workgroups reach. */
@@ -163,6 +173,8 @@ function plan(
     ? (w === 32 ? "fill_below32" : "fill_below64")
     : floats || normal || exponential
     ? "fill_f32"
+    : K % TILE_STEPS === 0 && !isApple(device)
+    ? "fill_tile"
     : "fill";
   const extra = range !== undefined
     ? new Uint32Array([Number(bound & 0xffffffffn), Number(bound >> 32n), 0, 0])
