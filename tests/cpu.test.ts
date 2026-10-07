@@ -13,8 +13,8 @@ const TABLE = new ChoiceTable([1, 2, 3, 4]);
 
 test("1e6 exponentials and Float32 normals at five starts stay near the exact forms", () => {
   // f64: against the fused arithmetic of tandem-c on the same uniforms, which hashes to the
-  // dump. f32: against libm, in double. The bounds sit a little above the worst deviations
-  // measured.
+  // dump. f32: against libm, in double, where the exponential keeps tandem-c's 0.58 ulp bound.
+  // The other bounds sit a little above the worst deviations measured.
   const key = keyOf(EXP_DUMP.key), N = EXP_DUMP.draws[0].n, dumped: ArrayBufferView[] = [];
   let e64 = 0, e32 = 0, n32 = 0;
   for (const start of EXP_DUMP.starts) {
@@ -36,7 +36,7 @@ test("1e6 exponentials and Float32 normals at five starts stay near the exact fo
     }
   }
   console.log(`worst: exponential f64 ${e64} ulps, f32 ${e32} ulps, normal f32 ${n32}`);
-  assertEquals(e64 < 4 && e32 < 3 && n32 < 1e-6, true);
+  assertEquals(e64 < 4 && e32 < 0.58 && n32 < 1e-6, true);
   assertEquals(fnv1a(dumped), EXP_DUMP.fnv1a);
 });
 

@@ -1,5 +1,5 @@
 // The CPU path against the conformance files of the specification, one test per section of
-// its conformance/CHECKLIST.md at tandem-spec b31af72.
+// its conformance/CHECKLIST.md at tandem-spec 2a4bd08.
 import { existsSync } from "node:fs";
 import { block, ChoiceTable, seed, Tandem } from "../src/mod.ts";
 import {

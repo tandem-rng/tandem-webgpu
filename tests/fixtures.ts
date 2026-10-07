@@ -1,5 +1,5 @@
 // Readers for the conformance files of the specification. tests/conformance holds byte copies
-// of tandem-spec conformance/*.json at b31af72, the commit CI pins.
+// of tandem-spec conformance/*.json at 2a4bd08, the commit CI pins.
 import { createHash } from "node:crypto";
 import { align, type Key } from "../src/mod.ts";
 import below from "./conformance/below.json" with { type: "json" };

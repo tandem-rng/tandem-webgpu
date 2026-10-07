@@ -76,7 +76,7 @@ jobs:
     name: vectors, conformance files and ziggurat tables are current
     runs-on: ubuntu-latest
     env:
-      SPEC_PIN: b31af7238076b414a3eb2a128bfd010cce136287
+      SPEC_PIN: 2a4bd08205596bc12bb7ae102862c97a0477dc2e
     steps:
       - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
