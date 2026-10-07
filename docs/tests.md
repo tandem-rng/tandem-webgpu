@@ -13,7 +13,7 @@ run on Node, Deno and Bun.
 
 `tests/conformance.test.ts` reads the conformance files of the specification in
 `tests/conformance` and has one test per section of the spec's `conformance/CHECKLIST.md` at
-b31af72. It
+2a4bd08. It
 runs every case of `below.json`, `fill_below.json`, `normal.json`, `exponential.json` and
 `choice.json` on the `Tandem` class and checks the values and the end position, the seven empty
 fills included. It checks that `n` scalar draws equal each Float64 normal, exponential and
@@ -37,7 +37,8 @@ rejections.
 
 `tests/cpu.test.ts` checks the exponentials and Float32 normals on the 1e6-element fills of the
 exponential dump: the Float64 exponentials against the exact fused form within 4 ulps, whose
-FNV-1a equals the dump of tandem-c, and the Float32 exponentials and normals against libm on the
+FNV-1a with the Float32 exponentials equals the dump of tandem-c, which makes the Float32
+exponentials bit exact, the Float32 exponentials within 0.58 ulp and the normals against libm on the
 same uniforms. It checks the first four moments and the KS law of 1e7 draws of each normal and
 exponential. It checks the emulated `fma64` against an exact BigInt oracle on random and on
 halfway cases, and the Horner steps of the logarithm's polynomial against the chain of exact
@@ -83,11 +84,11 @@ The tests state what the port does instead of each item its API can not express.
 
 | Fixture | Commit |
 |---|---|
-| the specification's `conformance/*.json`, copied byte for byte to `tests/conformance` | b31af72 |
-| the specification's `vectors.json` | b31af72 |
+| the specification's `conformance/*.json`, copied byte for byte to `tests/conformance` | 2a4bd08 |
+| the specification's `vectors.json` | 2a4bd08 |
 | the specification's `tables/normal_f64_zig1024.json`, SHA-256 checked | 469a0ae |
 
-The conformance files come from tandem-c at 1adf2ac. `tests/data` holds six of the stream dumps
+The conformance files come from tandem-c at 1c75956. `tests/data` holds six of the stream dumps
 of tandem-c, whose SHA-256 the tests check against `hashes.json`.
 
 ## CI

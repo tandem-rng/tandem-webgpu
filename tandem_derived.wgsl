@@ -231,6 +231,28 @@ fn neg2_log(x: f32) -> f32 {
     return fma(nk, 2.857213530660374e-06, fma(nk, 1.38629150390625, (s * -4.0) * p));
 }
 
+// -ln x for x in (0, 1], the Float32 exponential of tandem-c, within 0.58 ulp where fma fuses and
+// division rounds correctly, which WGSL does not promise. The leading term
+// u = (2 - 2m) / (m + 1) is carried as uh + r / d, with m + 1 = d + dl exactly and r the residual
+// of uh, and nk ln2_hi + uh is split exactly by fast two-sum.
+fn neg_log(x: f32) -> f32 {
+    let bits = bitcast<u32>(x) + 0x004afb0du;
+    let nk = f32(127i - i32(bits >> 23u));
+    let m = bitcast<f32>((bits & 0x007fffffu) + 0x3f3504f3u);
+    let num = fma(m, -2.0, 2.0);
+    let d = m + 1.0;
+    let dl = m - (d - 1.0);
+    let rcp = 1.0 / d;
+    let uh = fma(num, rcp, 0.0);
+    let r = fma(-uh, dl, fma(-uh, d, num));
+    let v = uh * uh;
+    let q = fma(v, fma(v, 0.0023109776, 0.012496489), 0.08333336);
+    let a = nk * 0.693145751953125;
+    let hi = a + uh;
+    let e = uh - (hi - a);
+    return hi + fma(uh * v, q, fma(r, rcp, fma(nk, 1.428606765330187e-06, e)));
+}
+
 // Box-Muller of the uniforms (a, b) in single precision.
 //
 // cos and sin of 2 pi b: b - q/4 for the nearest quarter turn q is exact, so the angle lies in
@@ -290,5 +312,5 @@ fn exponential_f32(@builtin(global_invocation_id) id: vec3<u32>) {
     if (j >= Q.z) {
         return;
     }
-    store_f32(Q.x + j, 0.5 * neg2_log(1.0 - load_f32(Q.x + j)));
+    store_f32(Q.x + j, neg_log(1.0 - load_f32(Q.x + j)));
 }

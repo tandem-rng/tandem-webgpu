@@ -25,7 +25,8 @@ const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" }
 - `fillBelow`, `nextBelow`: bounded integers by Lemire's method, width chosen from the range.
 - `fillNormal`, `fillNormalF32`, `fillNormalF64`: Box-Muller f32 and ziggurat f64 normals, exact
   with tandem-c on CPU.
-- `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, same logarithm.
+- `fillExponential`, `fillExponentialF32`, `fillExponentialF64`: exponentials, the Float32 ones
+  by tandem-c's two-part logarithm, exact with tandem-c on CPU.
 - `ChoiceTable`, `fillChoice`, `nextChoice`: weighted choice by an alias table, exact with
   tandem-c on CPU and GPU.
 - `seed`, `split`, `sub`, `fork`: keys and child generators.

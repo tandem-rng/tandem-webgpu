@@ -2,8 +2,9 @@
 // with the spec's tables, a short polynomial logarithm, Taylor series for cos and sin, and a
 // multiply-add at every place tandem-c fuses one. JavaScript has no fma. The slow path of the
 // Float64 ziggurat emulates it exactly, `fma64`, so the Float64 normals equal tandem-c bit for
-// bit on any engine. The Float32 normals and both exponentials round the plain sum, which is
-// four times faster and agrees with tandem-c within the ulp tolerance of Appendix A.
+// bit on any engine. The Float32 exponential fuses exactly too, `fmaf`, and equals tandem-c bit
+// for bit. The Float32 normals and the Float64 exponential round the plain sum, which is faster
+// and agrees with tandem-c within the ulp tolerance of Appendix A.
 import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
@@ -130,6 +131,39 @@ export function neg2Log32(x: number): number {
   return fma32(nk, L32_LO, fma32(nk, L32_HI, fr(fr(s * -4) * p)));
 }
 
+/** The Float32 multiply-add of Float32 values held in doubles, rounded once. The product is
+ * exact, and t is the error of the double sum s, so fround(s) is the fused result unless s lies
+ * exactly halfway between two Float32 values. Then the sign of t picks the side. Arguments stay
+ * in the normal range, which holds for the logarithm below. */
+function fmaf(a: number, b: number, c: number): number {
+  const p = a * b, s = p + c, bb = s - p, t = (p - (s - bb)) + (c - bb);
+  const r = fr(s);
+  if (t === 0 || r === s) return r;
+  const h = s - r, other = r + 2 * h;
+  return fr(other) === other && (t > 0) === (h > 0) ? other : r;
+}
+
+const LOG_Q32 = Float32Array.of(0.0023109776, 0.012496489, 0.08333336);
+const LN2_HI32 = fr(0.693145751953125), LN2_LO32 = fr(1.428606765330187e-06);
+
+/** -ln x for x in (0, 1], tandem-c's neg_log_f32, within 0.58 ulp: the Float32 exponential. The
+ * leading term u = (2 - 2m) / (m + 1) is carried as uh + r / d, with m + 1 = d + dl exactly and
+ * r the residual of uh, and nk ln2_hi + uh is split exactly by fast two-sum. Division, products
+ * and sums of Float32 values in double and one fround round exactly once. */
+export function negLog32(x: number): number {
+  F32[0] = x;
+  const ix = I32[0] + 0x004afb0d;
+  const nk = 127 - (ix >>> 23);
+  I32[0] = (ix & 0x7fffff) + 0x3f3504f3;
+  const m = F32[0];
+  const num = fmaf(m, -2, 2), d = fr(m + 1), dl = fr(m - fr(d - 1));
+  const rcp = fr(1 / d), uh = fr(num * rcp);
+  const r = fmaf(-uh, dl, fmaf(-uh, d, num)), v = fr(uh * uh);
+  const q = fmaf(v, fmaf(v, LOG_Q32[0], LOG_Q32[1]), LOG_Q32[2]);
+  const a = fr(nk * LN2_HI32), hi = fr(a + uh), e = fr(uh - fr(hi - a));
+  return fr(hi + fmaf(fr(uh * v), q, fmaf(r, rcp, fmaf(nk, LN2_LO32, e))));
+}
+
 // The widths W[i] for a clear sign bit and -W[i] at 1024 + i for a set one, so the table index
 // is the low 11 bits of a draw and the sign needs no branch.
 const ZW = new Float64Array(2048);
@@ -219,5 +253,5 @@ export function exponential64(z: Float64Array, m: number): void {
 }
 
 export function exponential32(z: Float32Array, m: number): void {
-  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log32(fr(1 - z[j]));
+  for (let j = 0; j < m; j++) z[j] = negLog32(fr(1 - z[j]));
 }
