@@ -1,6 +1,17 @@
 // The CPU path: scalar draws, fills, normals and exponentials beyond the conformance cases.
 import { align, block, ChoiceTable, fillCpu, seed, Tandem } from "../src/mod.ts";
-import { fma64, horner64, LOG_POLY } from "../src/derived.ts";
+import {
+  fma64,
+  horner64,
+  LN2_HI,
+  LN2_LO,
+  LN2_LO_H,
+  LN2_LO_L,
+  LOG_LIM,
+  LOG_POLY,
+  LOG_WMAX,
+  neg2Log64,
+} from "../src/derived.ts";
 import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
 import { fnv1a, hashes, keyOf } from "./fixtures.ts";
@@ -174,12 +185,71 @@ test("the Horner steps of the polynomials equal the chain of exact fused steps",
     state = (state * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
     return Number(state >> 11n) * 2 ** -53;
   };
-  // w is s^2 of the logarithm, at most 0.0295.
-  for (let i = 0; i < 20000; i++) {
-    const w = i % 50 === 0 ? rand() * 2 ** -40 : rand() * 0.0295;
+  // w is s^2 of the logarithm, at most LOG_WMAX, and every s^2 the logarithm can form is a
+  // square, so squares of random s and w near the top of the range stand in for them.
+  assertEquals(LOG_WMAX < 0.0295 && LOG_WMAX > 0.0294, true, `wmax ${LOG_WMAX}`);
+  const chain = (w: number) => {
     let acc = LOG_POLY[0];
     for (let k = 1; k < LOG_POLY.length; k++) acc = exactFma(w, acc, LOG_POLY[k], 53);
-    assertEquals(horner64(w, LOG_POLY), acc, `w = ${w}`);
+    return acc;
+  };
+  // Zero limits force the full path on every step, which must agree too.
+  const none = new Float64Array(LOG_POLY.length);
+  assertEquals(LOG_LIM.slice(1).every((l) => l > 0), true, `limits ${LOG_LIM}`);
+  for (let i = 0; i < 200000; i++) {
+    const w = i % 50 === 0
+      ? rand() * 2 ** -40
+      : i % 50 === 1
+      ? LOG_WMAX * (1 - rand() * 2 ** -30)
+      : (rand() * Math.sqrt(LOG_WMAX)) ** 2;
+    const want = chain(w);
+    assertEquals(horner64(w, LOG_POLY, LOG_LIM), want, `w = ${w}`);
+    assertEquals(horner64(w, LOG_POLY, none), want, `full path, w = ${w}`);
+  }
+  // The ends of the mantissa range come from x just below and at sqrt(1/2) in [1/2, 1).
+  const f = new Float64Array(1), u = new Uint32Array(f.buffer);
+  const wOf = (hi: number, lo: number) => {
+    u[1] = hi;
+    u[0] = lo;
+    u[1] = ((u[1] + 0x00095f62) & 0xfffff) + 0x3fe6a09e;
+    return ((f[0] - 1) / (f[0] + 1)) ** 2;
+  };
+  assertEquals(LOG_WMAX, Math.max(wOf(0x3fe6a09d, 0xffffffff), wOf(0x3fe6a09e, 0)));
+});
+
+test("neg2Log64 equals tandem-c's chain of exact fused steps over the whole input range", () => {
+  let state = 0x1234567n;
+  const rand = () => {
+    state = (state * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
+    return Number(state >> 11n) * 2 ** -53;
+  };
+  const f = new Float64Array(1), u = new Uint32Array(f.buffer);
+  const want = (x: number) => {
+    f[0] = x;
+    const ix = u[1] + 0x00095f62, nk = 1023 - (ix >>> 20);
+    u[1] = (ix & 0xfffff) + 0x3fe6a09e;
+    const s = (f[0] - 1) / (f[0] + 1), w = s * s;
+    let p = LOG_POLY[0];
+    for (let k = 1; k < LOG_POLY.length; k++) p = exactFma(w, p, LOG_POLY[k], 53);
+    return exactFma(LN2_LO, nk, exactFma(LN2_HI, nk, (s * -4.0) * p, 53), 53);
+  };
+  const xs = [1, 2 ** -1074, 2 ** -1022, 0.5, 2 ** -0.5, 1 - 2 ** -53, 2 ** -1022 * (2 - 2 ** -52)];
+  // 1e5 points keep the BigInt reference under bun's 5 s limit on a slow runner.
+  for (let i = 0; i < 100000; i++) {
+    // Uniforms as the exponentials see them, then every binade down to the subnormals.
+    xs.push(i % 2 ? 1 - rand() : (1 + rand()) * 2 ** -Math.floor(rand() * 1075));
+  }
+  for (const x of xs) assertEquals(neg2Log64(x), want(x), `x = ${x}`);
+});
+
+test("the ln 2 constants give exact products with every exponent", () => {
+  // nk * LN2_HI is exact, so its fused add is a plain sum, and nk times either Veltkamp half of
+  // LN2_LO is exact, so the product's error needs no split. nk runs over the exponents of x in
+  // (0, 1] including the subnormals.
+  for (let nk = 0; nk <= 1074; nk++) {
+    for (const c of [LN2_HI, LN2_LO_H, LN2_LO_L]) {
+      assertEquals(fma64(nk, c, -(nk * c)), 0, `${nk} * ${c}`);
+    }
   }
 });
 
@@ -414,6 +484,26 @@ test("fillCpu returns the typed arrays and end position of fill, signed types in
   const c = fillCpu({ key, position, count: 51, dtype: "u32", choice: TABLE });
   const g = new Tandem(key, { position });
   assertEquals(c, { values: g.fillChoice(51, TABLE), position: g.position });
+});
+
+test("the WebAssembly exponential map gives the values of the JavaScript one", () => {
+  // Fills that cross the kernel's block, odd lengths that leave an element to JavaScript, a
+  // scalar draw, and 2e6 values so the lanes that leave the plain chain show up in both maps.
+  const run = () =>
+    [1, 2, 3, 2047, 2048, 2049, 4097, 2000000].map((n) => {
+      const g = new Tandem(seed(11n), { position: 5n });
+      return [g.fillExponentialF64(n), g.nextExponentialF64()];
+    });
+  const hasWasm = useWasm(true), wasm = run();
+  useWasm(false);
+  try {
+    assertEquals(run(), wasm);
+  } finally {
+    useWasm(true);
+  }
+  console.log(
+    `WebAssembly exponentials ${hasWasm ? "in use" : "missing, both runs used JavaScript"}`,
+  );
 });
 
 test("the JavaScript kernel gives the words of the WebAssembly kernel", () => {

@@ -5,6 +5,7 @@
 // bit on any engine. The exponentials fuse exactly too, `fmaw` and `fmaf`, and equal tandem-c
 // bit for bit. The Float32 normals round the plain sum, which is faster and agrees with
 // tandem-c within the ulp tolerance of Appendix A.
+import { expBlock, expConsts, kernel } from "./stream.ts";
 import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
@@ -16,15 +17,11 @@ const HI = 1;
 
 const SPLIT = 134217729; // 2^27 + 1, Veltkamp's splitter
 
-/** w * b + c rounded once, where w = wh + wl is already split by Veltkamp's method. Dekker's
- * product gives p + e = w * b exactly and the 2Sum of c and p gives s + t, so the total is
- * s + (t + e). When that inner sum is exact the outer rounding is the fused result. Otherwise
- * only a tie of the outer sum can go wrong, and the sign of the lost part settles it. Arguments
- * stay clear of overflow and of the subnormal range, which holds for the polynomials below. */
-function fmaw(w: number, wh: number, wl: number, b: number, c: number): number {
-  const t = SPLIT * b, bh = t - (t - b), bl = b - bh;
-  const p = w * b;
-  const e = ((wh * bh - p) + wh * bl + wl * bh) + wl * bl;
+/** c + p + e rounded once, for p + e an exact product. The 2Sum of c and p gives s + t, so the
+ * total is s + (t + e). When that inner sum is exact the outer rounding is the fused result.
+ * Otherwise only a tie of the outer sum can go wrong, and the sign of the lost part settles it.
+ * Arguments stay clear of overflow and of the subnormal range, which holds for the uses below. */
+function sumFused(c: number, p: number, e: number): number {
   const s = c + p, bb = s - c;
   const t1 = (c - (s - bb)) + (p - bb);
   const v = t1 + e, bv = v - t1, ev = (t1 - (v - bv)) + (e - bv);
@@ -38,33 +35,69 @@ function fmaw(w: number, wh: number, wl: number, b: number, c: number): number {
   return z;
 }
 
-/** a * b + c rounded once, as a fused multiply-add. */
+/** a * b + c rounded once, as a fused multiply-add: Dekker's product, then the fused sum. */
 export function fma64(a: number, b: number, c: number): number {
-  const t = SPLIT * a, ah = t - (t - a);
-  return fmaw(a, ah, a - ah, b, c);
+  const t = SPLIT * a, ah = t - (t - a), al = a - ah;
+  const u = SPLIT * b, bh = u - (u - b), bl = b - bh;
+  const p = a * b;
+  return sumFused(c, p, ((ah * bh - p) + ah * bl + al * bh) + al * bl);
+}
+
+/** The spacing of the doubles in the binade of x, for normal positive x. */
+function ulp(x: number): number {
+  F64[0] = x;
+  return 2 ** ((U32[HI] >>> 20) - 1075);
+}
+
+/** For the Horner steps of `horner64` on positive coefficients c and w in [0, wmax]: the bound on
+ * the rounding error of the plain sum below which the plain sum is the fused result. The step
+ * adds the coefficient to a product p that is at most wmax times the largest accumulator, so
+ * |p - round(p)| is at most half the spacing of p's binade, and the fused sum is round(s + t + e)
+ * for s + t the exact plain sum. When |t| plus that bound stays below half the spacing of s, the
+ * fused sum is s. The spacing is the coefficient's: s is at least the coefficient, a power of two
+ * above it lies in a higher binade and keeps at least that spacing below, and when s equals the
+ * coefficient the lost part t + e is not negative, so the spacing above applies. A zero bound
+ * makes the step take the full path. */
+export function hornerLimits(c: Float64Array, wmax: number): Float64Array {
+  const lim = new Float64Array(c.length);
+  let accMax = c[0];
+  for (let k = 1; k < c.length; k++) {
+    const pmax = wmax * accMax * (1 + 2 ** -40);
+    lim[k] = Math.max(0, ulp(c[k]) / 2 - ulp(pmax) / 2);
+    accMax = c[k] + pmax;
+  }
+  return lim;
 }
 
 /** The polynomial c[0] w^(n-1) + ... + c[n-1] by fused Horner steps, as the nested fma calls of
- * tandem-c. The split of w is shared by all steps. Each step adds the coefficient to a product
- * that is smaller in magnitude, which holds for the logarithm's polynomial below, so the sum
- * needs only Fast2Sum, and the lost part of the second sum is read only on a tie. */
-export function horner64(w: number, c: Float64Array): number {
-  const t0 = SPLIT * w, wh = t0 - (t0 - w), wl = w - wh;
+ * tandem-c, for lim = hornerLimits(c, wmax) and w in [0, wmax]. A step whose plain sum is proven
+ * to be the fused result by its Fast2Sum error, nearly all of them, stops there. The others
+ * take Dekker's product. Each step adds the coefficient to a product that is smaller in
+ * magnitude, so the sum needs only Fast2Sum, and the lost part of the second sum is read only on
+ * a tie. */
+export function horner64(w: number, c: Float64Array, lim: Float64Array): number {
   let acc = c[0];
   for (let k = 1; k < c.length; k++) {
-    const cc = c[k], t = SPLIT * acc, bh = t - (t - acc), bl = acc - bh;
-    const p = w * acc, e = ((wh * bh - p) + wh * bl + wl * bh) + wl * bl;
-    const s = cc + p, t1 = p - (s - cc);
-    // When t1 is not 0, |s| exceeds |v| by far, so the Fast2Sum below is exact. When it is 0,
-    // v = e exactly and z is already the fused result.
-    const v = t1 + e, z = s + v, r = v - (z - s), r2 = r + r;
-    acc = z;
-    if (r !== 0 && (z + r2) - z === r2) {
-      const bv = v - t1, ev = (t1 - (v - bv)) + (e - bv);
-      if (ev !== 0 && (ev > 0) === (r > 0)) acc = z + r2;
-    }
+    const cc = c[k], p = w * acc, s = cc + p, t1 = p - (s - cc);
+    acc = Math.abs(t1) < lim[k] ? s : hornerStep(w, acc, p, s, t1);
   }
   return acc;
+}
+
+/** The fused Horner step c + w * acc for the plain sum s with Fast2Sum error t1 and the rounded
+ * product p: Dekker's product gives the product's error e, and the step is round(s + t1 + e). */
+function hornerStep(w: number, acc: number, p: number, s: number, t1: number): number {
+  const t0 = SPLIT * w, wh = t0 - (t0 - w), wl = w - wh;
+  const t = SPLIT * acc, bh = t - (t - acc), bl = acc - bh;
+  const e = ((wh * bh - p) + wh * bl + wl * bh) + wl * bl;
+  // When t1 is not 0, |s| exceeds |v| by far, so the Fast2Sum below is exact. When it is 0,
+  // v = e exactly and z is already the fused result.
+  const v = t1 + e, z = s + v, r = v - (z - s), r2 = r + r;
+  if (r !== 0 && (z + r2) - z === r2) {
+    const bv = v - t1, ev = (t1 - (v - bv)) + (e - bv);
+    if (ev !== 0 && (ev > 0) === (r > 0)) return z + r2;
+  }
+  return z;
 }
 
 /** The Float32 multiply-add of Float32 values held in doubles. The product is exact, so this
@@ -80,14 +113,35 @@ export const LOG_POLY = Float64Array.of(
   0.33333333333331017,
   1.0,
 );
-// ln 2 split so that nk * LN2_HI is exact.
-const LN2_HI = 1.3862943607382476, LN2_LO = 3.816429394731813e-10;
-const LN2_HI_H = SPLIT * LN2_HI - (SPLIT * LN2_HI - LN2_HI), LN2_HI_L = LN2_HI - LN2_HI_H;
-const LN2_LO_H = SPLIT * LN2_LO - (SPLIT * LN2_LO - LN2_LO), LN2_LO_L = LN2_LO - LN2_LO_H;
+// 2 ln 2 split so that nk * LN2_HI is exact for the 11-bit exponents nk, and LN2_LO split by
+// Veltkamp so that nk times either half is exact.
+export const LN2_HI = 1.3862943607382476, LN2_LO = 3.816429394731813e-10;
+export const LN2_LO_H = SPLIT * LN2_LO - (SPLIT * LN2_LO - LN2_LO), LN2_LO_L = LN2_LO - LN2_LO_H;
+
+/** The double with the given high and low words. */
+function fromWords(hi: number, lo: number): number {
+  U32[HI] = hi;
+  U32[1 - HI] = lo;
+  return F64[0];
+}
+
+/** The largest s^2 of `neg2Log64`: s and s^2 are monotone in |mant - 1| through rounding, so the
+ * two ends of the mantissa range, high word 0x3fe6a09e to 0x3ff6a09d, give it. */
+export const LOG_WMAX = Math.max(
+  ...[fromWords(0x3fe6a09e, 0), fromWords(0x3ff6a09d, 0xffffffff)].map((m) =>
+    ((m - 1) / (m + 1)) ** 2
+  ),
+);
+export const LOG_LIM = hornerLimits(LOG_POLY, LOG_WMAX);
 
 /** -2 ln x for x in (0, 1]: x = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits, then
  * 2 k ln 2 - 4 s p(s^2) with s = (mant - 1) / (mant + 1). Every multiply-add rounds once as in
- * tandem-c, so the Float64 exponentials and the ziggurat slow path equal tandem-c bit for bit. */
+ * tandem-c, so the Float64 exponentials and the ziggurat slow path equal tandem-c bit for bit.
+ * The product nk * LN2_HI is exact, so its fused add is the plain sum. The last step adds
+ * q = nk * LN2_LO, below 2^-21, to y, which is 0 for nk = 0 and else at least 0.69 in magnitude,
+ * so the product's error is below 2^-74 and the plain sum is the fused one when its Fast2Sum
+ * error stays under LAST_LIM |y|, as in `hornerLimits`. Otherwise the two products of nk with
+ * the halves of LN2_LO are exact, so their difference from q is its error without a split. */
 export function neg2Log64(x: number): number {
   F64[0] = x;
   const ix = U32[HI] + 0x00095f62;
@@ -95,14 +149,21 @@ export function neg2Log64(x: number): number {
   U32[HI] = (ix & 0xfffff) + 0x3fe6a09e;
   const mant = F64[0];
   const s = (mant - 1) / (mant + 1), w = s * s;
-  const p = horner64(w, LOG_POLY);
-  return fmaw(
-    LN2_LO,
-    LN2_LO_H,
-    LN2_LO_L,
-    nk,
-    fmaw(LN2_HI, LN2_HI_H, LN2_HI_L, nk, (s * -4.0) * p),
-  );
+  const y = nk * LN2_HI + (s * -4.0) * horner64(w, LOG_POLY, LOG_LIM);
+  const q = nk * LN2_LO, z = y + q, t1 = q - (z - y);
+  if (Math.abs(t1) < LAST_LIM * Math.abs(y)) return z;
+  return sumFused(y, q, (nk * LN2_LO_H - q) + nk * LN2_LO_L);
+}
+
+// Half the spacing of y is above |y| 2^-54, and 2^-74 is below |y| 2^-73 for |y| at least 1/2.
+const LAST_LIM = 2 ** -54 - 2 ** -73;
+
+// The table that exp64 of stream.wat reads, in its layout: the polynomial, its limits and the
+// constants of neg2Log64.
+if (expConsts) {
+  expConsts.set(LOG_POLY, 0);
+  expConsts.set(LOG_LIM, 8);
+  expConsts.set([SPLIT, LN2_HI, LN2_LO, LN2_LO_H, LN2_LO_L, LAST_LIM], 16);
 }
 
 const fr = Math.fround;
@@ -242,9 +303,25 @@ export function normalPairs32(z: Float32Array, m: number): void {
   }
 }
 
-/** In place, z[j] = -ln(1 - z[j]) for uniforms z[j]. Halving -2 ln is exact. */
+/** In place, z[j] = -ln(1 - z[j]) for uniforms z[j]. Halving -2 ln is exact. The WebAssembly
+ * kernel maps pairs through its block, with the same arithmetic two lanes at a time, and the
+ * JavaScript form takes the odd element and runs everywhere else. */
 export function exponential64(z: Float64Array, m: number): void {
-  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j]);
+  let j = 0;
+  const k = kernel();
+  if (k && expBlock) {
+    for (
+      let n = Math.min(m, expBlock.length) & ~1;
+      n > 1;
+      n = Math.min(m - j, expBlock.length) & ~1
+    ) {
+      expBlock.set(z.subarray(j, j + n));
+      k.exp64(n);
+      z.set(expBlock.subarray(0, n), j);
+      j += n;
+    }
+  }
+  for (; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j]);
 }
 
 export function exponential32(z: Float32Array, m: number): void {

@@ -12,15 +12,15 @@ runtime offers for that output: `crypto.getRandomValues` for raw words, otherwis
 
 | Apple M4 Pro | Tandem | baseline |
 |---|---|---|
-| `fillU32` | 14.6 | 10.8 |
-| `fillF32` | 4.62 | 0.84 |
-| `fillF64` | 4.88 | 1.64 |
-| `fillU32Below`, range 1000 | 1.86 | 0.85 |
-| `fillNormalF64` | 1.31 | 0.45 |
-| `fillNormalF32` | 0.30 | 0.23 |
-| `fillExponentialF64` | 1.01 | 0.77 |
-| `fillExponentialF32` | 0.44 | 0.37 |
-| `nextU32` loop | 1.07 | 0.87 |
+| `fillU32` | 14.4 | 10.9 |
+| `fillF32` | 4.55 | 0.84 |
+| `fillF64` | 5.18 | 1.72 |
+| `fillU32Below`, range 1000 | 1.59 | 0.84 |
+| `fillNormalF64` | 1.28 | 0.43 |
+| `fillNormalF32` | 0.31 | 0.21 |
+| `fillExponentialF64` | 0.70 | 0.74 |
+| `fillExponentialF32` | 0.09 | 0.36 |
+| `nextU32` loop | 1.04 | 0.80 |
 
 The fills run the WebAssembly SIMD kernel of `src/stream.wat`. The JavaScript kernel, which
 engines without WebAssembly SIMD fall back to, fills u32 at about a quarter of that rate. The
@@ -28,9 +28,14 @@ float fills map the words in a JavaScript loop, which caps them below the u32 fi
 
 - The Float64 normals take the exact logarithm only on the 0.43 % of draws that miss the
   ziggurat's inner rectangles, so they keep the emulated fma and stay bit exact with tandem-c.
-- The exponentials and Float32 normals round the plain multiply-add. The exact emulation ran
-  the Float64 exponentials at a quarter of this rate and the Float32 paths at about half. They
-  stay within 4 ulps of tandem-c.
+- The Float64 exponentials are bit exact with tandem-c. The WebAssembly kernel maps them two
+  lanes at a time: the plain chain of the logarithm with a per-lane bound that proves each plain
+  sum is the fused one, and the emulated fused chain for the few pairs that fail. In JavaScript
+  alone, where engines lack WebAssembly SIMD, the same check runs per step at 0.40 GiB/s and
+  the full emulation ran at 0.26. The plain chain alone, one ulp off tandem-c, ran at 1.01.
+- The Float32 exponentials fuse exactly too, through double arithmetic, and the two-float
+  logarithm of 2026-10-07 brought them to 0.09 GiB/s from 0.44. Making them faster is open.
+- The Float32 normals round the plain multiply-add and stay within 4 ulps of tandem-c.
 - A 4-wide unrolled map from words to floats measured the same as the plain loop, and a
   16-bit-limb `mulHi` is 1.8 times faster than a double product in the JavaScript lane loop.
 - GPU exponentials (`fillExponential`, `exponential_f32`) deviate from the tandem-cuda fixtures by
