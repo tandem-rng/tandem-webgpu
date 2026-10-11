@@ -23,6 +23,9 @@ type Kernel = {
   exp_capacity: WebAssembly.Global;
   consts: WebAssembly.Global;
   exp64(n: number): void;
+  exp32_capacity: WebAssembly.Global;
+  consts32: WebAssembly.Global;
+  exp32(n: number): void;
 };
 
 /** The WebAssembly kernel, or undefined where the engine lacks WebAssembly SIMD or a content
@@ -59,6 +62,12 @@ export const expBlock = compiled &&
   new Float64Array(compiled.memory.buffer, compiled.exp.value, compiled.exp_capacity.value);
 export const expConsts = compiled &&
   new Float64Array(compiled.memory.buffer, compiled.consts.value, 22);
+
+/** The same block as floats for `exp32`, and its table of Float32 constants. */
+export const expBlock32 = compiled &&
+  new Float32Array(compiled.memory.buffer, compiled.exp.value, compiled.exp32_capacity.value);
+export const expConsts32 = compiled &&
+  new Float32Array(compiled.memory.buffer, compiled.consts32.value, 5);
 
 /** High word of a 32 x 32 bit product, from 16-bit halves. Measured against a double product
  * with a rounded quotient, this is 1.8 times faster in the lane loop. */
