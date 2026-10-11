@@ -40,9 +40,9 @@ exponential dump: the FNV-1a of both exponential fills equals the dump of tandem
 them bit exact, the Float32 exponentials within 0.58 ulp against libm in double and the normals
 against libm on the same uniforms. It checks the first four moments and the KS law of 1e7 draws
 of each normal and exponential. It checks the emulated `fma64` against an exact BigInt oracle on
-random and on halfway cases, and the Horner steps of the logarithm's polynomial against the chain of exact
-fused steps. It checks that the JavaScript kernel gives the words of the WebAssembly kernel
-across chunk groups and output buffers. It checks that scalar draws equal the fills across rows,
+random and on halfway cases, and the Horner steps of the logarithm's polynomial against the chain
+of exact fused steps. It checks that the JavaScript kernel gives the words of the WebAssembly
+kernel across chunk groups and output buffers. It checks that scalar draws equal the fills across rows,
 windows and chunk groups for K = 1, 8 and 32, from every bit offset for u8, u16 and bool, and
 that fills equal the `block` function at K = 1 and K = 65536. It checks fills into a caller array
 or `subarray`, empty fills of every kind, the width rule of `nextBelow` and `fillBelow`, normal
