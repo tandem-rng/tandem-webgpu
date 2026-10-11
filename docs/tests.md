@@ -36,14 +36,13 @@ derived generators, and a bounded fill cut at arbitrary boundaries at K = 32 and
 rejections.
 
 `tests/cpu.test.ts` checks the exponentials and Float32 normals on the 1e6-element fills of the
-exponential dump: the Float64 exponentials against the exact fused form within 4 ulps, whose
-FNV-1a with the Float32 exponentials equals the dump of tandem-c, which makes the Float32
-exponentials bit exact, the Float32 exponentials within 0.58 ulp and the normals against libm on the
-same uniforms. It checks the first four moments and the KS law of 1e7 draws of each normal and
-exponential. It checks the emulated `fma64` against an exact BigInt oracle on random and on
-halfway cases, and the Horner steps of the logarithm's polynomial against the chain of exact
-fused steps. It checks that the JavaScript kernel gives the words of the WebAssembly kernel
-across chunk groups and output buffers. It checks that scalar draws equal the fills across rows,
+exponential dump: the FNV-1a of both exponential fills equals the dump of tandem-c, which makes
+them bit exact, the Float32 exponentials within 0.58 ulp against libm in double and the normals
+against libm on the same uniforms. It checks the first four moments and the KS law of 1e7 draws
+of each normal and exponential. It checks the emulated `fma64` against an exact BigInt oracle on
+random and on halfway cases, and the Horner steps of the logarithm's polynomial against the chain
+of exact fused steps. It checks that the JavaScript kernel gives the words of the WebAssembly
+kernel across chunk groups and output buffers. It checks that scalar draws equal the fills across rows,
 windows and chunk groups for K = 1, 8 and 32, from every bit offset for u8, u16 and bool, and
 that fills equal the `block` function at K = 1 and K = 65536. It checks fills into a caller array
 or `subarray`, empty fills of every kind, the width rule of `nextBelow` and `fillBelow`, normal
@@ -77,8 +76,6 @@ The tests state what the port does instead of each item its API can not express.
   stream hashes and the complex draw across a block do not apply.
 - A start lies below 2^63 and a count is a number below 2^53, so no fill can reach 2^64. The
   endpoint check stays in the code but no test can reach it.
-- The Float64 exponentials round each multiply-add twice for speed and stay within 4 ulps of
-  the fixtures. Their exact fused form matches the dump hash.
 
 ## Fixtures
 

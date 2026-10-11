@@ -2,9 +2,9 @@
 // with the spec's tables, a short polynomial logarithm, Taylor series for cos and sin, and a
 // multiply-add at every place tandem-c fuses one. JavaScript has no fma. The slow path of the
 // Float64 ziggurat emulates it exactly, `fma64`, so the Float64 normals equal tandem-c bit for
-// bit on any engine. The Float32 exponential fuses exactly too, `fmaf`, and equals tandem-c bit
-// for bit. The Float32 normals and the Float64 exponential round the plain sum, which is faster
-// and agrees with tandem-c within the ulp tolerance of Appendix A.
+// bit on any engine. The exponentials fuse exactly too, `fmaw` and `fmaf`, and equal tandem-c
+// bit for bit. The Float32 normals round the plain sum, which is faster and agrees with
+// tandem-c within the ulp tolerance of Appendix A.
 import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
@@ -86,28 +86,23 @@ const LN2_HI_H = SPLIT * LN2_HI - (SPLIT * LN2_HI - LN2_HI), LN2_HI_L = LN2_HI -
 const LN2_LO_H = SPLIT * LN2_LO - (SPLIT * LN2_LO - LN2_LO), LN2_LO_L = LN2_LO - LN2_LO_H;
 
 /** -2 ln x for x in (0, 1]: x = mant 2^k with mant in [sqrt(1/2), sqrt(2)) from the bits, then
- * 2 k ln 2 - 4 s p(s^2) with s = (mant - 1) / (mant + 1). With `exact`, every multiply-add rounds
- * once as in tandem-c. Without, each rounds twice, within 1e-15 relative of the exact form. */
-export function neg2Log64(x: number, exact: boolean): number {
+ * 2 k ln 2 - 4 s p(s^2) with s = (mant - 1) / (mant + 1). Every multiply-add rounds once as in
+ * tandem-c, so the Float64 exponentials and the ziggurat slow path equal tandem-c bit for bit. */
+export function neg2Log64(x: number): number {
   F64[0] = x;
   const ix = U32[HI] + 0x00095f62;
   const nk = 1023 - (ix >>> 20);
   U32[HI] = (ix & 0xfffff) + 0x3fe6a09e;
   const mant = F64[0];
   const s = (mant - 1) / (mant + 1), w = s * s;
-  if (exact) {
-    const p = horner64(w, LOG_POLY);
-    return fmaw(
-      LN2_LO,
-      LN2_LO_H,
-      LN2_LO_L,
-      nk,
-      fmaw(LN2_HI, LN2_HI_H, LN2_HI_L, nk, (s * -4.0) * p),
-    );
-  }
-  let p = LOG_POLY[0];
-  for (let k = 1; k < LOG_POLY.length; k++) p = p * w + LOG_POLY[k];
-  return LN2_LO * nk + (LN2_HI * nk + (s * -4.0) * p);
+  const p = horner64(w, LOG_POLY);
+  return fmaw(
+    LN2_LO,
+    LN2_LO_H,
+    LN2_LO_L,
+    nk,
+    fmaw(LN2_HI, LN2_HI_H, LN2_HI_L, nk, (s * -4.0) * p),
+  );
 }
 
 const fr = Math.fround;
@@ -199,13 +194,13 @@ export function zigSlow(lo: number, hi: number, f: Draws64): number {
       // The tail beyond R, by Marsaglia's method.
       let a: number, b: number;
       do {
-        a = 0.5 * neg2Log64(1 - uniform(f), true) / ZIG_R;
-        b = 0.5 * neg2Log64(1 - uniform(f), true);
+        a = 0.5 * neg2Log64(1 - uniform(f)) / ZIG_R;
+        b = 0.5 * neg2Log64(1 - uniform(f));
       } while (b + b < a * a);
       return lo & 1024 ? -(ZIG_R + a) : ZIG_R + a;
     }
     const y = ZIG_Y[i] + uniform(f) * (ZIG_Y[i + 1] - ZIG_Y[i]);
-    if (-0.5 * neg2Log64(y, true) < -0.5 * (x * x)) return x;
+    if (-0.5 * neg2Log64(y) < -0.5 * (x * x)) return x;
     f.next();
     lo = f.lo;
     hi = f.hi;
@@ -249,7 +244,7 @@ export function normalPairs32(z: Float32Array, m: number): void {
 
 /** In place, z[j] = -ln(1 - z[j]) for uniforms z[j]. Halving -2 ln is exact. */
 export function exponential64(z: Float64Array, m: number): void {
-  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j], false);
+  for (let j = 0; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j]);
 }
 
 export function exponential32(z: Float32Array, m: number): void {

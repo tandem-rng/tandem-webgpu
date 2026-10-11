@@ -1,6 +1,6 @@
 // The CPU path: scalar draws, fills, normals and exponentials beyond the conformance cases.
 import { align, block, ChoiceTable, fillCpu, seed, Tandem } from "../src/mod.ts";
-import { fma64, horner64, LOG_POLY, neg2Log64 } from "../src/derived.ts";
+import { fma64, horner64, LOG_POLY } from "../src/derived.ts";
 import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
 import { fnv1a, hashes, keyOf } from "./fixtures.ts";
@@ -11,20 +11,15 @@ import { assertEquals, test } from "./harness.ts";
 const EXP_DUMP = hashes.dumps.find((d) => d.id === "tools/dump_exponentials.c")!;
 const TABLE = new ChoiceTable([1, 2, 3, 4]);
 
-test("1e6 exponentials and Float32 normals at five starts stay near the exact forms", () => {
-  // f64: against the fused arithmetic of tandem-c on the same uniforms, which hashes to the
-  // dump. f32: against libm, in double, where the exponential keeps tandem-c's 0.58 ulp bound.
-  // The other bounds sit a little above the worst deviations measured.
+test("1e6 exponentials and Float32 normals at five starts match the dump and the exact forms", () => {
+  // Both exponential fills hash to tandem-c's dump. f32: also against libm, in double, where
+  // the exponential keeps tandem-c's 0.58 ulp bound. The normal bound sits a little above the
+  // worst deviation measured.
   const key = keyOf(EXP_DUMP.key), N = EXP_DUMP.draws[0].n, dumped: ArrayBufferView[] = [];
-  let e64 = 0, e32 = 0, n32 = 0;
+  let e32 = 0, n32 = 0;
   for (const start of EXP_DUMP.starts) {
     const position = BigInt(start), g = new Tandem(key, { position });
-    const exact = g.fillF64(N).map((u) => 0.5 * neg2Log64(1 - u, true));
-    const x64 = new Tandem(key, { position }).fillExponentialF64(N);
-    for (let i = 0; i < N; i++) {
-      e64 = Math.max(e64, Math.abs(x64[i] - exact[i]) / (2 ** -52 * exact[i]));
-    }
-    dumped.push(exact, g.fillExponentialF32(N));
+    dumped.push(g.fillExponentialF64(N), g.fillExponentialF32(N));
     const u32 = new Tandem(key, { position }).fillF32(2 * N);
     const x32 = new Tandem(key, { position }).fillExponentialF32(2 * N);
     const z32 = new Tandem(key, { position }).fillNormalF32(2 * N);
@@ -35,8 +30,8 @@ test("1e6 exponentials and Float32 normals at five starts stay near the exact fo
       n32 = Math.max(n32, Math.abs(z32[i] - (i & 1 ? r * Math.sin(b) : r * Math.cos(b))));
     }
   }
-  console.log(`worst: exponential f64 ${e64} ulps, f32 ${e32} ulps, normal f32 ${n32}`);
-  assertEquals(e64 < 4 && e32 < 0.58 && n32 < 1e-6, true);
+  console.log(`worst: exponential f32 ${e32} ulps, normal f32 ${n32}`);
+  assertEquals(e32 < 0.58 && n32 < 1e-6, true);
   assertEquals(fnv1a(dumped), EXP_DUMP.fnv1a);
 });
 
