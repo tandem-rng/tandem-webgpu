@@ -19,6 +19,10 @@ type Kernel = {
   capacity: WebAssembly.Global;
   seed(): void;
   rows(skip: number, n: number): void;
+  exp: WebAssembly.Global;
+  exp_capacity: WebAssembly.Global;
+  consts: WebAssembly.Global;
+  exp64(n: number): void;
 };
 
 /** The WebAssembly kernel, or undefined where the engine lacks WebAssembly SIMD or a content
@@ -40,11 +44,21 @@ const OUT = compiled ? compiled.out.value >> 2 : 0,
   CAPACITY = compiled ? compiled.capacity.value : 0;
 
 /** Choose the WebAssembly kernel (when the engine has it) or the JavaScript one, and say
- * whether the WebAssembly kernel is in use. Both give the same words. */
+ * whether the WebAssembly kernel is in use. Both give the same words, and derived.ts the same
+ * Float64 exponentials. */
 export function useWasm(on: boolean): boolean {
   wasm = on ? compiled : undefined;
   return wasm !== undefined;
 }
+
+/** The WebAssembly kernel in use, or undefined. */
+export const kernel = (): Kernel | undefined => wasm;
+
+/** The kernel's block of doubles for `exp64` and its table of constants, as views. */
+export const expBlock = compiled &&
+  new Float64Array(compiled.memory.buffer, compiled.exp.value, compiled.exp_capacity.value);
+export const expConsts = compiled &&
+  new Float64Array(compiled.memory.buffer, compiled.consts.value, 22);
 
 /** High word of a 32 x 32 bit product, from 16-bit halves. Measured against a double product
  * with a rounded quotient, this is 1.8 times faster in the lane loop. */
