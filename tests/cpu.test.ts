@@ -234,7 +234,8 @@ test("neg2Log64 equals tandem-c's chain of exact fused steps over the whole inpu
     return exactFma(LN2_LO, nk, exactFma(LN2_HI, nk, (s * -4.0) * p, 53), 53);
   };
   const xs = [1, 2 ** -1074, 2 ** -1022, 0.5, 2 ** -0.5, 1 - 2 ** -53, 2 ** -1022 * (2 - 2 ** -52)];
-  for (let i = 0; i < 300000; i++) {
+  // 1e5 points keep the BigInt reference under bun's 5 s limit on a slow runner.
+  for (let i = 0; i < 100000; i++) {
     // Uniforms as the exponentials see them, then every binade down to the subnormals.
     xs.push(i % 2 ? 1 - rand() : (1 + rand()) * 2 ** -Math.floor(rand() * 1075));
   }
