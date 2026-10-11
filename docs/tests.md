@@ -44,8 +44,9 @@ random and on halfway cases, the Horner steps of the logarithm's polynomial, wit
 its plain-sum shortcut, against the chain of exact fused steps, the whole Float64 logarithm
 against tandem-c's chain over every binade, and the exact products of the ln 2 constants. It
 checks that the JavaScript kernel gives the words of the WebAssembly kernel across chunk groups
-and output buffers, and the JavaScript exponential map the values of the WebAssembly one across
-its block and at odd lengths. It checks that scalar draws equal the fills across rows,
+and output buffers, and the JavaScript exponential maps the values of the WebAssembly ones across
+their block and at odd lengths, the Float32 one on every grid uniform. It checks that scalar
+draws equal the fills across rows,
 windows and chunk groups for K = 1, 8 and 32, from every bit offset for u8, u16 and bool, and
 that fills equal the `block` function at K = 1 and K = 65536. It checks fills into a caller array
 or `subarray`, empty fills of every kind, the width rule of `nextBelow` and `fillBelow`, normal

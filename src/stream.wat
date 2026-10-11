@@ -8,7 +8,8 @@
 ;; 4 (8 k + l), so word k of lanes 0 to 3 is the v128 at 32 k and of lanes 4 to 7 the one at
 ;; 32 k + 16, then the key at 256, the low and high word of chunk counter c of lane 0 at 272
 ;; and 276, the row j inside the group at 280 and the chunk length K at 284. The Float64
-;; exponential map of exp64 has its block of 2048 doubles at 33280 and its constants at 49664.
+;; exponential maps of exp64 and exp32 share the block of 16 KiB at 33280, with the constants
+;; of exp64 at 49664 and of exp32 at 49856.
 (module
   (memory (export "memory") 1)
   (global (export "out") i32 (i32.const 512))
@@ -435,6 +436,117 @@
               (v128.not (v128.xor (f64x2.gt (local.get $ev) (local.get $zero))
                 (f64x2.gt (local.get $r) (local.get $zero))))))))))
       (v128.store (local.get $i) (f64x2.mul (local.get $z) (f64x2.splat (f64.const 0.5))))
+      (local.set $i (i32.add (local.get $i) (i32.const 16)))
+      (br $next))))
+
+  ;; fmaf4(a, b, c): a b + c rounded once in each Float32 lane, as derived.ts fmaf. Veltkamp's
+  ;; split by 2^12 + 1 and Dekker's product give a b = p + e exactly, then the fused sum of
+  ;; sumFused in derived.ts, with its tie condition as a bit select. The products of the split
+  ;; halves stay normal for the operands of exp32, which are at least 2^-80 or exactly 0.
+  (func $fmaf4 (param $a v128) (param $b v128) (param $c v128) (result v128)
+    (local $split v128) (local $zero v128) (local $ah v128) (local $al v128) (local $bh v128)
+    (local $bl v128) (local $p v128) (local $e v128) (local $s v128) (local $bb v128)
+    (local $t v128) (local $v v128) (local $bv v128) (local $ev v128) (local $z v128)
+    (local $bz v128) (local $r v128) (local $r2 v128)
+    (local.set $split (f32x4.splat (f32.const 4097)))
+    (local.set $zero (f32x4.splat (f32.const 0)))
+    (local.set $ah (f32x4.mul (local.get $split) (local.get $a)))
+    (local.set $ah (f32x4.sub (local.get $ah) (f32x4.sub (local.get $ah) (local.get $a))))
+    (local.set $al (f32x4.sub (local.get $a) (local.get $ah)))
+    (local.set $bh (f32x4.mul (local.get $split) (local.get $b)))
+    (local.set $bh (f32x4.sub (local.get $bh) (f32x4.sub (local.get $bh) (local.get $b))))
+    (local.set $bl (f32x4.sub (local.get $b) (local.get $bh)))
+    (local.set $p (f32x4.mul (local.get $a) (local.get $b)))
+    (local.set $e (f32x4.add (f32x4.add (f32x4.add
+      (f32x4.sub (f32x4.mul (local.get $ah) (local.get $bh)) (local.get $p))
+      (f32x4.mul (local.get $ah) (local.get $bl)))
+      (f32x4.mul (local.get $al) (local.get $bh)))
+      (f32x4.mul (local.get $al) (local.get $bl))))
+    (local.set $s (f32x4.add (local.get $c) (local.get $p)))
+    (local.set $bb (f32x4.sub (local.get $s) (local.get $c)))
+    (local.set $t (f32x4.add
+      (f32x4.sub (local.get $c) (f32x4.sub (local.get $s) (local.get $bb)))
+      (f32x4.sub (local.get $p) (local.get $bb))))
+    (local.set $v (f32x4.add (local.get $t) (local.get $e)))
+    (local.set $bv (f32x4.sub (local.get $v) (local.get $t)))
+    (local.set $ev (f32x4.add
+      (f32x4.sub (local.get $t) (f32x4.sub (local.get $v) (local.get $bv)))
+      (f32x4.sub (local.get $e) (local.get $bv))))
+    (local.set $z (f32x4.add (local.get $s) (local.get $v)))
+    (local.set $bz (f32x4.sub (local.get $z) (local.get $s)))
+    (local.set $r (f32x4.add
+      (f32x4.sub (local.get $s) (f32x4.sub (local.get $z) (local.get $bz)))
+      (f32x4.sub (local.get $v) (local.get $bz))))
+    (local.set $r2 (f32x4.add (local.get $r) (local.get $r)))
+    (v128.bitselect
+      (f32x4.add (local.get $z) (local.get $r2)) (local.get $z)
+      (v128.and (v128.and
+        (f32x4.ne (local.get $ev) (local.get $zero))
+        (f32x4.ne (local.get $r) (local.get $zero)))
+      (v128.and
+        (f32x4.eq (f32x4.sub (f32x4.add (local.get $z) (local.get $r2)) (local.get $z))
+          (local.get $r2))
+        (v128.not (v128.xor (f32x4.gt (local.get $ev) (local.get $zero))
+          (f32x4.gt (local.get $r) (local.get $zero))))))))
+
+  ;; exp32(n): z = -ln(1 - z) for the n floats at 33280, n a multiple of 4 and at most 4096,
+  ;; four lanes at a time with the arithmetic of derived.ts negLog32, which writes LOG_Q32,
+  ;; LN2_HI32 and LN2_LO32 to 49856 before the first call. 2 - 2 m is one subtraction, since
+  ;; 2 m is exact, and num - uh d is the exact difference num - p less e, since p lies within
+  ;; a factor of two of num. Every other multiply-add is fmaf4.
+  (global (export "exp32_capacity") i32 (i32.const 4096))
+  (global (export "consts32") i32 (i32.const 49856))
+  (func (export "exp32") (param $n i32)
+    (local $i i32) (local $split v128) (local $one v128) (local $x v128) (local $nk v128)
+    (local $m v128) (local $num v128) (local $d v128) (local $dl v128) (local $rcp v128)
+    (local $uh v128) (local $ah v128) (local $al v128) (local $bh v128) (local $bl v128)
+    (local $p v128) (local $r v128) (local $v v128) (local $q v128) (local $a v128)
+    (local $hi v128) (local $e v128)
+    (local.set $split (f32x4.splat (f32.const 4097)))
+    (local.set $one (f32x4.splat (f32.const 1)))
+    (local.set $i (i32.const 33280))
+    (local.set $n (i32.add (local.get $i) (i32.shl (local.get $n) (i32.const 2))))
+    (block $done (loop $next
+      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+      (local.set $x (f32x4.sub (local.get $one) (v128.load (local.get $i))))
+      (local.set $x (i32x4.add (local.get $x) (i32x4.splat (i32.const 0x004afb0d))))
+      (local.set $nk (f32x4.convert_i32x4_s (i32x4.sub (i32x4.splat (i32.const 127))
+        (i32x4.shr_u (local.get $x) (i32.const 23)))))
+      (local.set $m (i32x4.add (v128.and (local.get $x) (i32x4.splat (i32.const 0x7fffff)))
+        (i32x4.splat (i32.const 0x3f3504f3))))
+      (local.set $num (f32x4.sub (f32x4.splat (f32.const 2)) (f32x4.add (local.get $m) (local.get $m))))
+      (local.set $d (f32x4.add (local.get $m) (local.get $one)))
+      (local.set $dl (f32x4.sub (local.get $m) (f32x4.sub (local.get $d) (local.get $one))))
+      (local.set $rcp (f32x4.div (local.get $one) (local.get $d)))
+      (local.set $uh (f32x4.mul (local.get $num) (local.get $rcp)))
+      ;; r = -uh dl + (num - uh d), both fused.
+      (local.set $ah (f32x4.mul (local.get $split) (local.get $uh)))
+      (local.set $ah (f32x4.sub (local.get $ah) (f32x4.sub (local.get $ah) (local.get $uh))))
+      (local.set $al (f32x4.sub (local.get $uh) (local.get $ah)))
+      (local.set $bh (f32x4.mul (local.get $split) (local.get $d)))
+      (local.set $bh (f32x4.sub (local.get $bh) (f32x4.sub (local.get $bh) (local.get $d))))
+      (local.set $bl (f32x4.sub (local.get $d) (local.get $bh)))
+      (local.set $p (f32x4.mul (local.get $uh) (local.get $d)))
+      (local.set $r (f32x4.sub (f32x4.sub (local.get $num) (local.get $p))
+        (f32x4.add (f32x4.add (f32x4.add
+          (f32x4.sub (f32x4.mul (local.get $ah) (local.get $bh)) (local.get $p))
+          (f32x4.mul (local.get $ah) (local.get $bl)))
+          (f32x4.mul (local.get $al) (local.get $bh)))
+          (f32x4.mul (local.get $al) (local.get $bl)))))
+      (local.set $r (call $fmaf4 (f32x4.neg (local.get $uh)) (local.get $dl) (local.get $r)))
+      (local.set $v (f32x4.mul (local.get $uh) (local.get $uh)))
+      (local.set $q (call $fmaf4 (local.get $v)
+        (call $fmaf4 (local.get $v) (v128.load32_splat offset=49856 (i32.const 0))
+          (v128.load32_splat offset=49860 (i32.const 0)))
+        (v128.load32_splat offset=49864 (i32.const 0))))
+      (local.set $a (f32x4.mul (local.get $nk) (v128.load32_splat offset=49868 (i32.const 0))))
+      (local.set $hi (f32x4.add (local.get $a) (local.get $uh)))
+      (local.set $e (f32x4.sub (local.get $uh) (f32x4.sub (local.get $hi) (local.get $a))))
+      (v128.store (local.get $i) (f32x4.add (local.get $hi)
+        (call $fmaf4 (f32x4.mul (local.get $uh) (local.get $v)) (local.get $q)
+          (call $fmaf4 (local.get $r) (local.get $rcp)
+            (call $fmaf4 (local.get $nk) (v128.load32_splat offset=49872 (i32.const 0))
+              (local.get $e))))))
       (local.set $i (i32.add (local.get $i) (i32.const 16)))
       (br $next))))
 )

@@ -5,7 +5,7 @@
 // bit on any engine. The exponentials fuse exactly too, `fmaw` and `fmaf`, and equal tandem-c
 // bit for bit. The Float32 normals round the plain sum, which is faster and agrees with
 // tandem-c within the ulp tolerance of Appendix A.
-import { expBlock, expConsts, kernel } from "./stream.ts";
+import { expBlock, expBlock32, expConsts, expConsts32, kernel } from "./stream.ts";
 import { ZIG_K, ZIG_R, ZIG_W, ZIG_Y } from "./zig_tables.ts";
 
 const F64 = new Float64Array(1);
@@ -202,6 +202,12 @@ function fmaf(a: number, b: number, c: number): number {
 const LOG_Q32 = Float32Array.of(0.0023109776, 0.012496489, 0.08333336);
 const LN2_HI32 = fr(0.693145751953125), LN2_LO32 = fr(1.428606765330187e-06);
 
+// The table that exp32 of stream.wat reads: the polynomial, then the split ln 2.
+if (expConsts32) {
+  expConsts32.set(LOG_Q32, 0);
+  expConsts32.set([LN2_HI32, LN2_LO32], 3);
+}
+
 /** -ln x for x in (0, 1], tandem-c's neg_log_f32, within 0.58 ulp: the Float32 exponential. The
  * leading term u = (2 - 2m) / (m + 1) is carried as uh + r / d, with m + 1 = d + dl exactly and
  * r the residual of uh, and nk ln2_hi + uh is split exactly by fast two-sum. Division, products
@@ -324,6 +330,22 @@ export function exponential64(z: Float64Array, m: number): void {
   for (; j < m; j++) z[j] = 0.5 * neg2Log64(1 - z[j]);
 }
 
+/** As `exponential64` for Float32, four lanes at a time in the kernel and the last three at
+ * most in JavaScript. */
 export function exponential32(z: Float32Array, m: number): void {
-  for (let j = 0; j < m; j++) z[j] = negLog32(fr(1 - z[j]));
+  let j = 0;
+  const k = kernel();
+  if (k && expBlock32) {
+    for (
+      let n = Math.min(m, expBlock32.length) & ~3;
+      n > 3;
+      n = Math.min(m - j, expBlock32.length) & ~3
+    ) {
+      expBlock32.set(z.subarray(j, j + n));
+      k.exp32(n);
+      z.set(expBlock32.subarray(0, n), j);
+      j += n;
+    }
+  }
+  for (; j < m; j++) z[j] = negLog32(fr(1 - z[j]));
 }

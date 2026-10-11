@@ -1,6 +1,7 @@
 // The CPU path: scalar draws, fills, normals and exponentials beyond the conformance cases.
 import { align, block, ChoiceTable, fillCpu, seed, Tandem } from "../src/mod.ts";
 import {
+  exponential32,
   fma64,
   horner64,
   LN2_HI,
@@ -11,6 +12,7 @@ import {
   LOG_POLY,
   LOG_WMAX,
   neg2Log64,
+  negLog32,
 } from "../src/derived.ts";
 import { useWasm } from "../src/stream.ts";
 import { ZIG_K } from "../src/zig_tables.ts";
@@ -486,13 +488,18 @@ test("fillCpu returns the typed arrays and end position of fill, signed types in
   assertEquals(c, { values: g.fillChoice(51, TABLE), position: g.position });
 });
 
-test("the WebAssembly exponential map gives the values of the JavaScript one", () => {
-  // Fills that cross the kernel's block, odd lengths that leave an element to JavaScript, a
-  // scalar draw, and 2e6 values so the lanes that leave the plain chain show up in both maps.
+test("the WebAssembly exponential maps give the values of the JavaScript ones", () => {
+  // Fills that cross the kernel's block, lengths that leave elements to JavaScript, scalar
+  // draws, and 2e6 values so the lanes that leave the plain chain show up in both maps.
   const run = () =>
-    [1, 2, 3, 2047, 2048, 2049, 4097, 2000000].map((n) => {
+    [1, 2, 3, 5, 2047, 2048, 2049, 4095, 4096, 4097, 2000000].map((n) => {
       const g = new Tandem(seed(11n), { position: 5n });
-      return [g.fillExponentialF64(n), g.nextExponentialF64()];
+      return [
+        g.fillExponentialF64(n),
+        g.nextExponentialF64(),
+        g.fillExponentialF32(n),
+        g.nextExponentialF32(),
+      ];
     });
   const hasWasm = useWasm(true), wasm = run();
   useWasm(false);
@@ -506,6 +513,19 @@ test("the WebAssembly exponential map gives the values of the JavaScript one", (
   );
 });
 
+test("the WebAssembly Float32 exponential map equals the JavaScript one on every grid uniform", () => {
+  // Every uniform a Float32 fill can produce is a multiple of 2^-24 below 1, so the whole input
+  // range of the map has 2^24 points. The JavaScript map is the one the dump hash pins.
+  if (!useWasm(true)) return;
+  const N = 1 << 24, z = new Float32Array(N);
+  for (let i = 0; i < N; i++) z[i] = i * 2 ** -24;
+  const w = z.slice();
+  exponential32(w, N);
+  for (let i = 0; i < N; i++) {
+    const want = negLog32(Math.fround(1 - z[i]));
+    if (w[i] !== want) throw new Error(`grid point ${i}: kernel ${w[i]}, JavaScript ${want}`);
+  }
+});
 test("the JavaScript kernel gives the words of the WebAssembly kernel", () => {
   // Fills across chunk groups and the 256-row output buffer, and scalar draws through windows.
   const run = () =>

@@ -12,15 +12,15 @@ runtime offers for that output: `crypto.getRandomValues` for raw words, otherwis
 
 | Apple M4 Pro | Tandem | baseline |
 |---|---|---|
-| `fillU32` | 14.4 | 10.9 |
-| `fillF32` | 4.55 | 0.84 |
-| `fillF64` | 5.18 | 1.72 |
-| `fillU32Below`, range 1000 | 1.59 | 0.84 |
-| `fillNormalF64` | 1.28 | 0.43 |
-| `fillNormalF32` | 0.31 | 0.21 |
-| `fillExponentialF64` | 0.70 | 0.74 |
-| `fillExponentialF32` | 0.09 | 0.36 |
-| `nextU32` loop | 1.04 | 0.80 |
+| `fillU32` | 14.5 | 11.1 |
+| `fillF32` | 4.65 | 0.81 |
+| `fillF64` | 4.95 | 1.74 |
+| `fillU32Below`, range 1000 | 1.67 | 0.81 |
+| `fillNormalF64` | 1.35 | 0.46 |
+| `fillNormalF32` | 0.31 | 0.23 |
+| `fillExponentialF64` | 0.71 | 0.77 |
+| `fillExponentialF32` | 0.40 | 0.36 |
+| `nextU32` loop | 1.03 | 0.83 |
 
 The fills run the WebAssembly SIMD kernel of `src/stream.wat`. The JavaScript kernel, which
 engines without WebAssembly SIMD fall back to, fills u32 at about a quarter of that rate. The
@@ -33,8 +33,10 @@ float fills map the words in a JavaScript loop, which caps them below the u32 fi
   sum is the fused one, and the emulated fused chain for the few pairs that fail. In JavaScript
   alone, where engines lack WebAssembly SIMD, the same check runs per step at 0.40 GiB/s and
   the full emulation ran at 0.26. The plain chain alone, one ulp off tandem-c, ran at 1.01.
-- The Float32 exponentials fuse exactly too, through double arithmetic, and the two-float
-  logarithm of 2026-10-07 brought them to 0.09 GiB/s from 0.44. Making them faster is open.
+- The Float32 exponentials fuse exactly too. The kernel maps them four lanes at a time with
+  each fused multiply-add built from a Veltkamp split, Dekker's product and the fused sum, and
+  checks against the JavaScript map on all 2^24 inputs. In JavaScript alone, which emulates
+  each fused multiply-add in double, the two-float logarithm of 2026-10-07 runs at 0.09 GiB/s.
 - The Float32 normals round the plain multiply-add and stay within 4 ulps of tandem-c.
 - A 4-wide unrolled map from words to floats measured the same as the plain loop, and a
   16-bit-limb `mulHi` is 1.8 times faster than a double product in the JavaScript lane loop.
