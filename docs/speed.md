@@ -1,4 +1,4 @@
-# Speed
+# Performance
 
 `npm run bench:cpu` produces the CPU figures and `deno task bench` the GPU figures. Both tables
 come from one session on an Apple M4 Pro, in GiB/s of output.

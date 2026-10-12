@@ -6,7 +6,7 @@ every draw on the CPU for Node, Deno, Bun and browsers. It produces the stream o
 
 - [API](api.md): the CPU class, the GPU fills, the shaders and parallel use.
 - [Tests](tests.md): fixtures, hashes and what each suite checks.
-- [Speed](speed.md): CPU and GPU figures and rejected variants.
+- [Performance](speed.md): CPU and GPU figures and rejected variants.
 
 ## Install
 
