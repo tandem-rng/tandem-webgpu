@@ -12,12 +12,15 @@ The stream is bit exact with the specification. CPU exponentials are bit exact w
 CPU Float32 normals agree to 4 ulps, GPU normals with the CPU to 16 ulps plus 1e-6 and GPU
 exponentials to 8 ulps plus 1e-6.
 
-The git install builds `dist/` through `prepare`. In a clone, Deno, Bun and Node 24 or later
-import `src/mod.ts` directly. The GPU path needs WebGPU.
+## Install
+
+The git install builds `dist/` through `prepare`.
 
 ```sh
 npm install github:tandem-rng/tandem-webgpu
 ```
+
+## Quick start
 
 ```ts
 import { fill, requestDevice, seed, split, Tandem } from "tandem-webgpu";
@@ -30,8 +33,14 @@ const z = new Tandem(worker).fillNormalF64(1000);
 const gpu = await fill(await requestDevice(), { key, count: 1000, dtype: "u32" });
 ```
 
+## Requirements
+
+In a clone, Deno, Bun and Node 24 or later import `src/mod.ts` directly. The GPU path needs WebGPU.
+
+## Documentation
+
 See [API](docs/api.md), [tests](docs/tests.md) and [speed](docs/speed.md) for the detail.
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](https://tandem-rng.github.io/tandem-webgpu/) · [Apache 2.0 license](LICENSE)
+[Docs](https://tandem-rng.github.io/tandem-webgpu/) · [Specification](https://github.com/tandem-rng/spec/blob/main/SPEC.md) · [Website](https://tandem-rng.github.io/) · [Issues](https://github.com/tandem-rng/tandem-webgpu/issues) · [License](LICENSE)
