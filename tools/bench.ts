@@ -1,4 +1,6 @@
 // GiB/s of the GPU fills into device memory, no readback, against a plain Philox4x32-10 shader.
+// All timers include per-call planning, binding, encoding, submission and completion.
+// Buffer allocation and warmed pipeline compilation stay outside the measured calls.
 // Usage: deno run tools/bench.ts
 import { fillBuffer, fillMany, type FillOptions, requestDevice, seed } from "../src/mod.ts";
 
@@ -61,18 +63,18 @@ async function kernel(code: string, workgroups: number) {
     layout: "auto",
     compute: { module: device.createShaderModule({ code }), entryPoint: "fill" },
   });
-  const bind = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer } }],
-  });
   return async (reps: number) => {
+    const t0 = performance.now();
+    const bind = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer } }],
+    });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bind);
     for (let i = 0; i < reps; i++) pass.dispatchWorkgroups(workgroups);
     pass.end();
-    const t0 = performance.now();
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     return (performance.now() - t0) / 1e3 / reps;
